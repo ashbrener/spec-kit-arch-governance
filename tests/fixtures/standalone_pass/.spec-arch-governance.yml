@@ -1,0 +1,18 @@
+version: v1
+role: standalone
+namespace: APP
+mode: advisory
+resolve: filesystem
+adr_dir: docs/adr
+specs_dir: specs
+governance_adr: APP-ADR-000
+sources: []
+citation_keys:
+  source_specs: derived_from
+  adrs: cites
+checks:
+  citations_resolve: true
+  citations_current: true
+  namespace_valid: true
+  adr_immutability: false   # exercised separately in a temp git repo (deterministic)
+  governance_adopted: true

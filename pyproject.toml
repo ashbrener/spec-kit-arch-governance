@@ -1,0 +1,23 @@
+[project]
+name = "spec-kit-arch-governance"
+version = "0.1.0"
+description = "Keep specs, code & ADRs in sync — a read-only citation validator (the teeth) for the spec-kit-arch-governance convention (ARCH-ADR-000)."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+# Toolchain is uv, not pip. The validator is READ-ONLY: it never mutates a repo.
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["scripts"]
+testpaths = ["tests"]

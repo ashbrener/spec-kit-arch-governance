@@ -1,0 +1,15 @@
+version: v1
+role: standalone
+namespace: ARCH
+mode: advisory
+resolve: filesystem
+adr_dir: docs/adr
+specs_dir: specs
+governance_adr: ARCH-ADR-000
+sources: []
+checks:
+  citations_resolve: true
+  citations_current: true
+  namespace_valid: true
+  adr_immutability: true
+  governance_adopted: true
