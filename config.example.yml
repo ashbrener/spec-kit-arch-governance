@@ -1,0 +1,50 @@
+# spec-kit-arch-governance — per-repo config (the install interview's output).
+# One of these lives in each repo of a governance domain. Written by `install`,
+# not hand-authored. Values draw on the spec-kit-vocabulary contract (SPECKIT-ADR-000).
+# This file is an EXAMPLE (a multi-repo `build` member); see the standalone variant below.
+
+version: v1
+
+role: source            # source | build | standalone   (vocabulary: roles)
+namespace: CORE         # this repo's ADR prefix → IDs look like CORE-ADR-001
+mode: advisory          # advisory | blocking            (advisory-before-blocking)
+resolve: filesystem     # filesystem | git | registry    (how citations are resolved)
+
+adr_dir: docs/adr
+specs_dir: specs
+governance_adr: CORE-ADR-000   # the adopted rulebook (or this repo authors it)
+
+# Empty for `standalone`; for a `build` repo, the source set it cites.
+sources:
+  - id: core
+    locator: ../core    # sibling path | git URL | registry id (per `resolve`)
+    role: source
+
+# Which front-matter key carries which relation (vocabulary: relations).
+citation_keys:
+  source_specs: derived_from   # on spec.md  — which source specs this is derived from
+  adrs: cites                  # on plan.md  — which ADRs this plan is bound by
+
+# The read-only validator contract. Each check maps to a vocabulary guarantee.
+checks:
+  citations_resolve: true      # every derived_from/cites ID resolves to a real record
+  citations_current: true      # cited ADRs aren't Superseded/Deprecated
+  namespace_valid: true        # IDs are well-formed <PREFIX>-ADR-NNN, right prefix
+  adr_immutability: true       # accepted ADR bodies unedited above '## Amendments' (vs git history)
+  governance_adopted: true     # this repo's ADR README references governance_adr
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Standalone variant (one repo that is both source and build):
+#
+#   version: v1
+#   role: standalone
+#   namespace: APP
+#   mode: advisory
+#   resolve: filesystem
+#   adr_dir: docs/adr
+#   specs_dir: specs
+#   governance_adr: APP-ADR-000
+#   sources: []                 # none — citations are intra-repo
+#   citation_keys: { source_specs: derived_from, adrs: cites }
+#   checks: { citations_resolve: true, citations_current: true,
+#            namespace_valid: true, adr_immutability: true, governance_adopted: true }
