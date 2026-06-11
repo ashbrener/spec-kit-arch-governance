@@ -1,6 +1,6 @@
 # spec-kit-arch-governance — per-repo config (the install interview's output).
 # One of these lives in each repo of a governance domain. Written by `install`,
-# not hand-authored. Values draw on the spec-kit-vocabulary contract (SPECKIT-ADR-000).
+# not hand-authored. Values draw on the ARCH-ADR-000 vocabulary contract (docs/adr/).
 # This file is an EXAMPLE (a multi-repo `build` member); see the standalone variant below.
 
 version: v1
