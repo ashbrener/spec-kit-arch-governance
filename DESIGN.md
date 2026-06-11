@@ -120,9 +120,9 @@ The principle: **the extension asks; a fleet manager can answer on your behalf.*
 ## 10. Build plan (staged, reversible-first)
 
 1. **Policy** — define the convention as a portable doc/principle. ✅ *Done: it lives here as [`ARCH-ADR-000`](./docs/adr/ARCH-ADR-000-shared-vocabulary.md); this strategy is its enforcement design.*
-2. **Shape** — front-matter slots in SpecKit templates.
-3. **Teeth** — one validator, called from each repo's CI as a merge gate (advisory).
-4. **Interview** — the install ceremony that writes per-repo config.
+2. **Shape** — front-matter slots in SpecKit templates. ✅ *Done: `scripts/templates.py` prepends the `derived_from:`/`cites:` citation slots to a project's `.specify/templates/{spec,plan}-template.md` (idempotent, non-destructive), so every generated spec/plan is born-compliant. Wired into the install ceremony; `--no-templates` opts out.*
+3. **Teeth** — one validator, called from each repo's CI as a merge gate (advisory). ✅ *Done: `scripts/validate.py` — read-only, the five ARCH-ADR-000 checks.*
+4. **Interview** — the install ceremony that writes per-repo config. ✅ *Done: `scripts/install.py` — detect → interview → write → scaffold → patch templates → validate.*
 5. **Prove** — run one real build slice end-to-end under the convention.
 6. **Then** — flip `mode: blocking` per repo and tag 1.0.0. Package any fleet-adoption glue (version pin, pre-answered interview) *last*.
 
