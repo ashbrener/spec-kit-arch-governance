@@ -20,13 +20,21 @@ A standalone, interview-driven SpecKit extension that keeps a project's **specif
 
 This extension **owns and enforces** the shared vocabulary (`ARCH-ADR-000`); the reader conforms to it as a *format*, not a dependency:
 
+```mermaid
+flowchart TD
+    G["<b>spec-kit-arch-governance</b><br/>owns + enforces the contract"]:::writer
+    C(["<b>ARCH-ADR-000</b><br/>the shared vocabulary · a format"]):::contract
+    S["<b>spec-kit-synthesis</b><br/>(reader)"]:::reader
+
+    G -->|defines &amp; enforces| C
+    S -.->|"conforms to as a format —<br/>coded to it, like adapter_speckit is to<br/>spec-kit's layout · no import, no runtime dep"| C
+
+    classDef writer fill:#f3efe4,stroke:#b3471d,color:#17150f
+    classDef contract fill:#efe4f0,stroke:#6a3a6f,color:#17150f
+    classDef reader fill:#e2ece7,stroke:#1f5048,color:#17150f
 ```
-spec-kit-arch-governance   ← owns ARCH-ADR-000 (the contract) AND enforces it
-   │  defines the format ▼
-spec-kit-synthesis         conforms to that format via an adapter — coded to it,
-   (reader)                like adapter_speckit is coded to spec-kit's layout.
-                           No import, no runtime dependency; works on ungoverned repos too.
-```
+
+The solid arrow is ownership/enforcement; the **dashed** arrow is conformance — synthesis works on ungoverned repos too, and simply reads richer signal on governed ones.
 
 It makes the typed citations between specs, code, and ADRs **exist** (templates), stay **true** (validator), and get **enforced** (lifecycle hooks + CI) — advisory first, blocking once proven.
 
