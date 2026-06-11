@@ -2,7 +2,7 @@
 
 **A design strategy.** Self-contained — readable with no prior context.
 **Status:** design / pre-build. **License intent:** MIT, public, usable by anyone.
-**Conforms to:** [`spec-kit-vocabulary`](https://github.com/ashbrener/spec-kit-vocabulary) (`SPECKIT-ADR-000`) — the shared roles, relations, and ADR-ID grammar used below are defined there, not here.
+**Founding ruling:** [`ARCH-ADR-000`](./docs/adr/ARCH-ADR-000-shared-vocabulary.md) — the shared roles, relations, and ADR-ID grammar used below are defined there (this repo). Other tools conform to it as a documented format.
 **Version of this doc:** 1.0 · 2026-06-11
 
 ---
@@ -32,7 +32,7 @@ As you build, code changes, tools get swapped, APIs move — and the docs/specs/
 
 ## 4. Core model — roles, not names
 
-The extension knows nothing about "docs/backend/frontend." It knows **roles** (defined in `spec-kit-vocabulary`). A governance domain is 1…N repos; each repo has:
+The extension knows nothing about "docs/backend/frontend." It knows **roles** (defined in `ARCH-ADR-000`). A governance domain is 1…N repos; each repo has:
 
 | Field | Meaning |
 |---|---|
@@ -119,7 +119,7 @@ The principle: **the extension asks; a fleet manager can answer on your behalf.*
 
 ## 10. Build plan (staged, reversible-first)
 
-1. **Policy** — define the convention as a portable doc/principle. ✅ *Done: it lives in [`spec-kit-vocabulary`](https://github.com/ashbrener/spec-kit-vocabulary) (`SPECKIT-ADR-000`); this strategy is its enforcement design.*
+1. **Policy** — define the convention as a portable doc/principle. ✅ *Done: it lives here as [`ARCH-ADR-000`](./docs/adr/ARCH-ADR-000-shared-vocabulary.md); this strategy is its enforcement design.*
 2. **Shape** — front-matter slots in SpecKit templates.
 3. **Teeth** — one validator, called from each repo's CI as a merge gate (advisory).
 4. **Interview** — the install ceremony that writes per-repo config.

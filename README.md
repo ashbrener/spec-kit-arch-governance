@@ -5,32 +5,34 @@
 
 A standalone, interview-driven SpecKit extension that keeps a project's **specifications, code, and architecture decisions** from drifting apart — regardless of how many repos the project has or what they're named. It discovers your topology by asking at install, then rides the SpecKit lifecycle to keep cross-references honest.
 
-> **Status: design / pre-build.** This repo currently holds the design ([`DESIGN.md`](./DESIGN.md)) and the per-repo config shape ([`config.example.yml`](./config.example.yml)). The engine (interview, validator, hooks) is the next build — see the staged plan in `DESIGN.md` §10.
+> **Status: design / pre-build.** This repo currently holds the design ([`DESIGN.md`](./DESIGN.md)), the founding vocabulary ([`docs/adr/ARCH-ADR-000`](./docs/adr/ARCH-ADR-000-shared-vocabulary.md)), and the per-repo config shape ([`config.example.yml`](./config.example.yml)). The engine (interview, validator, hooks) is the next build — see `DESIGN.md` §10.
+
+## What's here
+
+| Path | What it is |
+|---|---|
+| [`docs/adr/ARCH-ADR-000-shared-vocabulary.md`](./docs/adr/ARCH-ADR-000-shared-vocabulary.md) | **The contract** this extension enforces — roles, relations, immutable ADR IDs, evidence tiers. |
+| [`docs/adr/vocabulary.json`](./docs/adr/vocabulary.json) | The machine-readable enums (the authoritative form; vendorable by consumers). |
+| [`DESIGN.md`](./DESIGN.md) | The full design strategy + staged build plan. |
+| [`config.example.yml`](./config.example.yml) | The per-repo config the install interview writes. |
 
 ## Where it sits
 
-It is the **write/enforce** side of a three-part discipline:
+This extension **owns and enforces** the shared vocabulary (`ARCH-ADR-000`); the reader conforms to it as a *format*, not a dependency:
 
 ```
-spec-kit-vocabulary        the shared contract (roles, relations, immutable ADR IDs) — SPECKIT-ADR-000
-   ▲                  ▲
-   │ conforms         │ conforms
-spec-kit-arch-          spec-kit-synthesis
-governance  ──────────▶ (reads the governed project, renders the storybook/portal)
-(THIS REPO: enforces      — it consumes this extension's output; it does not depend on it
- citations, gates merges)
+spec-kit-arch-governance   ← owns ARCH-ADR-000 (the contract) AND enforces it
+   │  defines the format ▼
+spec-kit-synthesis         conforms to that format via an adapter — coded to it,
+   (reader)                like adapter_speckit is coded to spec-kit's layout.
+                           No import, no runtime dependency; works on ungoverned repos too.
 ```
-
-- **Conforms to** [`spec-kit-vocabulary`](https://github.com/ashbrener/spec-kit-vocabulary) — it pins a version and vendors `vocabulary.json`; it does not redefine the words.
-- **Stewards** that vocabulary's content (proposes changes via its own immutable-ADR discipline) but does not host it.
-
-## What it does (in one line)
 
 It makes the typed citations between specs, code, and ADRs **exist** (templates), stay **true** (validator), and get **enforced** (lifecycle hooks + CI) — advisory first, blocking once proven.
 
 ## Not to be confused with
 
-- **`spec-kit-agent-governance`** — a different extension that scans a repo to generate a `GOVERNANCE.md` documenting repo state + an AI-agent capability index. Different axis: that governs *what a repo is / what agents can do*; this governs *whether spec↔code↔ADR citations resolve and stay immutable*.
+- **`spec-kit-agent-governance`** — a different extension that scans a repo to generate a `GOVERNANCE.md` documenting repo state + an AI-agent capability index. That governs *what a repo is / what agents can do*; this governs *whether spec↔code↔ADR citations resolve and stay immutable*.
 
 ## License
 
