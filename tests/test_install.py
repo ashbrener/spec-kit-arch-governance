@@ -82,6 +82,33 @@ def test_refuses_overwrite_without_force(tmp_path):
     assert I.main([str(tmp_path), "--non-interactive", "--force"]) == 0
 
 
+def _speckit_templates(root):
+    d = root / ".specify" / "templates"
+    d.mkdir(parents=True)
+    (d / "spec-template.md").write_text("# Feature Specification: [FEATURE NAME]\n")
+    (d / "plan-template.md").write_text("# Implementation Plan: [FEATURE]\n")
+    return d
+
+
+def test_install_patches_speckit_templates(tmp_path):
+    _spec(tmp_path, "001-thing")
+    d = _speckit_templates(tmp_path)
+    rc = I.main([str(tmp_path), "--non-interactive"])
+    assert rc == 0
+    spec_fm, _ = V.split_front_matter((d / "spec-template.md").read_text())
+    plan_fm, _ = V.split_front_matter((d / "plan-template.md").read_text())
+    assert spec_fm["derived_from"] == [] and plan_fm["cites"] == []
+
+
+def test_install_no_templates_flag_skips_patching(tmp_path):
+    _spec(tmp_path, "001-thing")
+    d = _speckit_templates(tmp_path)
+    before = (d / "spec-template.md").read_text()
+    rc = I.main([str(tmp_path), "--non-interactive", "--no-templates"])
+    assert rc == 0
+    assert (d / "spec-template.md").read_text() == before  # untouched
+
+
 def test_interview_drives_answers(monkeypatch):
     feed = iter(["standalone", "app", "docs/adr", "specs", "n", "y", "advisory", "filesystem"])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(feed))

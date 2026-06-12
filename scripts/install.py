@@ -13,8 +13,10 @@ Non-interactive / fleet pre-answered (a scaffolder answers on your behalf — DE
     uv run python scripts/install.py <repo-dir> --non-interactive   # accept all detected defaults
 
 The interview never assumes a layout: every question has a detected default, and a fleet
-manager can pre-answer them all. WRITES are confined to `.spec-arch-governance.yml` and
-(if you ask) the ADR scaffold; nothing else is touched.
+manager can pre-answer them all. WRITES are confined to `.spec-arch-governance.yml`, the
+SpecKit template citation slots (`.specify/templates/{spec,plan}-template.md`, born-compliance
+per DESIGN §8 — skip with `--no-templates`), and (if you ask) the ADR scaffold; nothing else
+is touched.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import GovernanceConfig, Role, Source  # noqa: E402
 import validate as V  # noqa: E402
+import templates as T  # noqa: E402
 
 CONFIG_NAME = ".spec-arch-governance.yml"
 ADR_DIR_CANDIDATES = ("docs/adr", "docs/adrs", "docs/ADRs", "adr", "adrs", "docs/decisions")
@@ -246,6 +249,8 @@ def main(argv=None) -> int:
     p.add_argument("--non-interactive", action="store_true", help="Accept all detected defaults; ask nothing.")
     p.add_argument("--force", action="store_true", help="Overwrite an existing config.")
     p.add_argument("--no-validate", action="store_true", help="Skip the post-install validate run.")
+    p.add_argument("--no-templates", action="store_true",
+                   help="Skip patching SpecKit templates with the citation slots (Shape, DESIGN §8).")
     args = p.parse_args(sys.argv[1:] if argv is None else list(argv))
 
     repo_root = Path(args.repo).resolve()
@@ -261,6 +266,9 @@ def main(argv=None) -> int:
           f"(role={cfg.role} ns={cfg.namespace} adr_dir={cfg.adr_dir} specs_dir={cfg.specs_dir} mode={cfg.mode})")
     for f in scaffolded:
         print(f"install: scaffolded {f.relative_to(repo_root)}")
+    if not args.no_templates:
+        for f in T.patch_templates(repo_root, cfg.citation_keys):
+            print(f"install: born-compliant — added citation slot to {f.relative_to(repo_root)}")
     if cfg.role != "build" and not answers.scaffold_governance and not cfg.governance_adr:
         print("install: note — no governance rulebook set; add one or re-run with a scaffold.")
 
