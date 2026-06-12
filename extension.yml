@@ -1,0 +1,83 @@
+# =============================================================================
+# spec-kit-arch-governance — SpecKit extension manifest
+# =============================================================================
+# The installation contract `specify extension add` reads. The CLI validates
+# this file, copies the repo into the consumer's `.specify/extensions/arch-governance/`,
+# and registers the hooks below into the consumer's `.specify/extensions.yml`.
+#
+# What this extension does: keep specs, code, and ADRs in sync via born-compliant
+# templates (the `derived_from:`/`cites:` slots) + a read-only citation validator that
+# rides the SpecKit lifecycle (after_specify / after_plan). Defined by ARCH-ADR-000.
+# =============================================================================
+
+schema_version: "1.0"
+
+extension:
+  # Lowercase-kebab id; the directory name under `.specify/extensions/`. Command
+  # names below must start with `speckit.arch-governance.`.
+  id: "arch-governance"
+  name: "spec-kit-arch-governance"
+  # Pre-1.0 while the convention is proven on a real slice (DESIGN §10 step 5);
+  # bumped to 1.0.0 when `mode: blocking` is flipped (step 6).
+  version: "0.1.0"
+  description: "Keep specs, code & ADRs in sync — born-compliant citation slots + a read-only fail-closed validator on every spec and plan."
+  author: "Ash Brener"
+  repository: "https://github.com/ashbrener/spec-kit-arch-governance"
+  license: "MIT"
+  homepage: "https://github.com/ashbrener/spec-kit-arch-governance"
+
+requires:
+  # Conventional floor used by sibling community extensions; the extension uses
+  # only stable extension-kit primitives, so no higher floor is forced.
+  speckit_version: ">=0.1.0"
+
+provides:
+
+  # The slash-command surface. `file` is relative to this extension's root and
+  # points at the Markdown body the host agent runs for that command.
+  commands:
+    # The teeth — read-only. Runs the five ARCH-ADR-000 checks against the repo
+    # and reports PASS / ADVISORY / FAIL. Every lifecycle hook below points here.
+    - name: "speckit.arch-governance.validate"
+      file: "commands/validate.md"
+      description: "Read-only citation validator: every derived_from/cites resolves, ADRs are current & immutable, namespaces valid. Never mutates the repo."
+
+    # The interview — discovers topology, writes the per-repo config, scaffolds a
+    # governance ADR, and patches the SpecKit templates with the citation slots.
+    - name: "speckit.arch-governance.install"
+      file: "commands/install.md"
+      description: "Install ceremony: interview topology (source/build/standalone), write .spec-arch-governance.yml, scaffold the governance ADR, make templates born-compliant."
+
+  # Informational: the per-repo config the install ceremony writes. The CLI does
+  # not auto-copy this; `speckit.arch-governance.install` creates it from the
+  # interview (config.example.yml is the documented shape).
+  config:
+    - name: ".spec-arch-governance.yml"
+      template: "config.example.yml"
+      description: "Per-repo governance config (role, namespace, mode, citation_keys, checks). Written by the install ceremony, not hand-authored."
+      required: false
+
+# Hooks auto-registered into the consumer's `.specify/extensions.yml`. Both ride
+# the workflow into the same read-only validator — a new spec validates its
+# `derived_from`, a new plan validates its `cites`. `optional: false` = runs on
+# every lifecycle step (the check is read-only and, in the default `mode: advisory`,
+# never blocks — it only warns). The blocking flip is a per-repo config decision
+# (DESIGN §10 step 6), not a manifest change.
+hooks:
+  after_specify:
+    command: "speckit.arch-governance.validate"
+    optional: false
+    description: "Validate the new spec's derived_from citations (advisory; read-only)."
+    condition: null
+  after_plan:
+    command: "speckit.arch-governance.validate"
+    optional: false
+    description: "Validate the new plan's cites against the ADRs (advisory; read-only)."
+    condition: null
+
+tags:
+  - "architecture"
+  - "governance"
+  - "adr"
+  - "citations"
+  - "spec-sync"
