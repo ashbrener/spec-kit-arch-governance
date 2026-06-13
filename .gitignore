@@ -4,3 +4,12 @@ __pycache__/
 .pytest_cache/
 .uv/
 uv.lock
+
+# SpecKit / agent scaffold — commit the scaffold, exclude secrets + runtime
+# (mirrors spec-kit-jira / spec-kit-linear-sync conventions).
+.env
+.env.*
+.claude/settings.local.json
+.claude/worktrees/
+.specify/cache/
+.specify/feature.json
