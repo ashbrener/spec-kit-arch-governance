@@ -50,3 +50,18 @@ checks:
 #   citation_keys: { source_specs: derived_from, adrs: cites }
 #   checks: { citations_resolve: true, citations_current: true,
 #            namespace_valid: true, adr_immutability: true, governance_adopted: true }
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# The DOMAIN MANIFEST (`.spec-arch-domain.yml`) — multi-repo only.
+#
+# One file, in the source/authority repo (the one owning the governance ADR). It is the
+# single shared record of the set — the namespace registry. Members self-configure from it
+# by PULL (each repo writes only its own .spec-arch-governance.yml), automatically on install.
+# `namespace` is the repo's ROLE in the domain (not the project name); it must be unique per
+# member (collisions are rejected). `locator` is relative to THIS (authority) repo.
+#
+#   version: v1
+#   members:
+#     - { name: docs,    role: source, namespace: CORE, locator: . }      # the authority itself
+#     - { name: service, role: build,  namespace: API,  locator: ../service }
+#     - { name: web,     role: build,  namespace: WEB,  locator: ../web }

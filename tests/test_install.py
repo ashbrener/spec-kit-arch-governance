@@ -158,6 +158,61 @@ def test_install_allows_blocking_when_clean(tmp_path):
     assert loaded.mode == "blocking"
 
 
+def test_install_pulls_config_from_domain_manifest_no_prompts(tmp_path):
+    """US1: a listed member self-configures from the manifest with zero interview prompts."""
+    import domain as D
+    authority = tmp_path / "docs"; authority.mkdir()
+    (authority / D.DOMAIN_NAME).write_text(
+        "version: v1\nmembers:\n"
+        "  - {name: docs, role: source, namespace: CORE, locator: .}\n"
+        "  - {name: service, role: build, namespace: API, locator: ../service}\n")
+    member = tmp_path / "service"; member.mkdir()
+    # no monkeypatch of input(): if the interview ran, this would hang/raise — proving no prompts
+    rc = I.main([str(member), "--source", "../docs"])
+    assert rc == 0
+    loaded = GovernanceConfig.model_validate(yaml.safe_load((member / I.CONFIG_NAME).read_text()))
+    assert loaded.role == "build" and loaded.namespace == "API"
+    assert loaded.sources[0].id == "docs" and loaded.sources[0].locator == "../docs"
+
+
+def test_install_falls_back_to_interview_when_not_a_member(tmp_path):
+    """FR-003: a repo not in any reachable manifest installs the normal way (no regression)."""
+    _spec(tmp_path, "001-thing")
+    rc = I.main([str(tmp_path), "--non-interactive"])  # no manifest reachable
+    assert rc == 0
+    loaded = GovernanceConfig.model_validate(yaml.safe_load((tmp_path / I.CONFIG_NAME).read_text()))
+    assert loaded.role == "standalone"
+
+
+def test_install_seed_writes_domain_manifest_from_siblings(tmp_path):
+    """US2: --seed proposes the set (self + detected siblings) and writes the manifest."""
+    import domain as D
+    authority = tmp_path / "docs"; authority.mkdir()
+    (tmp_path / "service").mkdir()
+    (tmp_path / "web").mkdir()
+    rc = I.main([str(authority), "--non-interactive", "--seed"])
+    assert rc == 0
+    m = D.load_manifest(authority / D.DOMAIN_NAME)
+    names = {mb.name for mb in m.members}
+    assert {"docs", "service", "web"} <= names
+    assert m.member("docs").locator == "."  # the authority is itself a member
+
+
+def test_end_to_end_seed_then_member_self_configures(tmp_path):
+    """T015: authority seeds the manifest; a member self-configures from it with zero prompts,
+    writing only its own config."""
+    import domain as D
+    authority = tmp_path / "docs"; authority.mkdir()
+    member = tmp_path / "service"; member.mkdir()
+    assert I.main([str(authority), "--non-interactive", "--seed"]) == 0   # seed at authority
+    assert I.main([str(member), "--source", "../docs"]) == 0              # member pulls, no prompts
+    loaded = GovernanceConfig.model_validate(yaml.safe_load((member / I.CONFIG_NAME).read_text()))
+    assert loaded.role == "build" and loaded.namespace
+    assert loaded.sources and loaded.sources[0].locator == "../docs"
+    # each install wrote only its own repo's config
+    assert (authority / I.CONFIG_NAME).is_file() and (member / I.CONFIG_NAME).is_file()
+
+
 def test_interview_drives_answers(monkeypatch):
     feed = iter(["standalone", "app", "docs/adr", "specs", "n", "y", "advisory", "filesystem"])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(feed))
