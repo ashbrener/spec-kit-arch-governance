@@ -1,0 +1,18 @@
+version: v1
+role: standalone
+namespace: DOCS
+mode: advisory
+resolve: filesystem
+adr_dir: docs/adr
+specs_dir: specs
+governance_adr: null
+sources: []
+citation_keys:
+  source_specs: derived_from
+  adrs: cites
+checks:
+  citations_resolve: true
+  citations_current: true
+  namespace_valid: true
+  adr_immutability: false
+  governance_adopted: false

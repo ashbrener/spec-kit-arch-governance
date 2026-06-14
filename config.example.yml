@@ -6,7 +6,9 @@
 version: v1
 
 role: source            # source | build | standalone   (vocabulary: roles)
-namespace: CORE         # this repo's ADR prefix → IDs look like CORE-ADR-001
+namespace: CORE         # this repo's ROLE in the domain (not the project name) → IDs look like
+                        # CORE-ADR-001. ADRs stored as bare ADR-NNN are read under this prefix
+                        # (no renames); cross-repo citations use the qualified CORE-ADR-NNN form.
 mode: advisory          # advisory | blocking            (advisory-before-blocking)
 resolve: filesystem     # filesystem | git | registry    (how citations are resolved)
 

@@ -14,11 +14,31 @@ from config import GovernanceConfig  # noqa: E402
 FIX = Path(__file__).parent / "fixtures"
 
 
-def test_suggest_namespace_is_uppercase_alnum():
-    assert I.suggest_namespace(Path("/x/acme-backend")) == "ACME"
-    assert I.suggest_namespace(Path("/x/spec-kit-arch-governance")) == "ARCH"  # drops spec/kit
+def test_suggest_namespace_prefers_repo_role_over_project_name():
+    # FR-007: a repo named <project>-<role> suggests the ROLE, not the project name,
+    # so members of a set don't all collide on the project prefix.
+    assert I.suggest_namespace(Path("/x/acme-backend")) == "BE"
+    assert I.suggest_namespace(Path("/x/acme-frontend")) == "FE"
+    assert I.suggest_namespace(Path("/x/the-docs")) == "DOCS"
+
+
+def test_suggest_namespace_falls_back_and_is_alnum():
+    assert I.suggest_namespace(Path("/x/spec-kit-arch-governance")) == "ARCH"  # no role hint; drops spec/kit
     ns = I.suggest_namespace(Path("/x/123weird"))
     assert ns[0].isalpha() and ns.isalnum()
+
+
+def test_namespace_prompt_conveys_role_intent(monkeypatch):
+    # FR-006: the interview explains the namespace identifies the repo's role.
+    prompts = []
+    feed = iter(["standalone", "", "docs/adr", "specs", "n", "n", "advisory", "filesystem"])
+    def fake_input(prompt=""):
+        prompts.append(prompt)
+        return next(feed)
+    monkeypatch.setattr("builtins.input", fake_input)
+    I.interview({"namespace": "ARCH", "specs_dir": "specs", "adr_dir": "docs/adr"})
+    ns_prompt = next((p for p in prompts if "namespace" in p.lower()), "")
+    assert "role" in ns_prompt.lower(), f"namespace prompt should convey role intent: {ns_prompt!r}"
 
 
 def test_detect_finds_specs_and_adr_dirs():

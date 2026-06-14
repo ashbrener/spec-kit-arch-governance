@@ -38,7 +38,7 @@ The extension knows nothing about "docs/backend/frontend." It knows **roles** (d
 |---|---|
 | **role** | `source` (holds authoritative specs + platform ADRs), `build` (build-specs + impl ADRs that cite a source), or `standalone` (one repo that is both) |
 | **name** | whatever the user calls it |
-| **namespace** | ADR ID prefix for this repo (e.g. `CORE`, `API`, `WEB`); user-chosen |
+| **namespace** | ADR ID prefix identifying this repo's **role/position** in the domain (e.g. `CORE`, `API`, `WEB`) — *not* the project name; user-chosen. A repo's ADRs may be stored un-prefixed (`ADR-NNN`) and are read under this namespace, so adoption needs no renames; cross-repo citations use the qualified `<namespace>-ADR-NNN` form. |
 | **locator** | how to resolve citations into this repo: sibling filesystem path, git URL, or a registry |
 
 **Single-repo is first-class** (`standalone`), not a degraded case: specs and ADRs live together, citations are intra-repo, and you still get ADR-immutability + namespacing + spec↔ADR validation.

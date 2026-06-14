@@ -1,7 +1,7 @@
 {
   "id": "ARCH-ADR-000",
   "title": "The shared vocabulary",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "status": "accepted",
   "license": "MIT",
   "home": "spec-kit-arch-governance/docs/adr",
@@ -40,9 +40,12 @@
   },
   "adr_id": {
     "pattern": "^[A-Z][A-Z0-9]*-ADR-\\d{3,}$",
+    "bare_pattern": "^ADR-\\d{3,}$",
     "example": "CORE-ADR-002",
     "rules": [
-      "Namespace is a repo-chosen uppercase prefix.",
+      "Namespace is a repo-chosen uppercase prefix identifying the repo's role/position in the domain (declared in the repo's config), not the project name.",
+      "An un-prefixed 'ADR-NNN' inherits the configured namespace of the repo it lives in (read as '<namespace>-ADR-NNN'); adoption requires no file renames.",
+      "The fully-qualified form is canonical and required for cross-repo citations; a bare 'ADR-NNN' resolves only within its own repo.",
       "Numbers are allocated at acceptance; a not-yet-accepted decision occupies no number.",
       "Accepted ADR bodies are immutable above an '## Amendments' heading.",
       "A decision change is a new ADR that supersedes the old."

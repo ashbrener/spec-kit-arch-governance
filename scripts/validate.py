@@ -29,6 +29,8 @@ from config import CitationKeys, GovernanceConfig  # noqa: E402
 
 ADR_ID_RE = re.compile(r"^[A-Z][A-Z0-9]*-ADR-\d{3,}$")
 ADR_ID_IN = re.compile(r"\b([A-Z][A-Z0-9]*-ADR-\d{3,})\b")
+BARE_ADR_RE = re.compile(r"^ADR-\d{3,}$")          # un-prefixed id: inherits the repo's namespace
+BARE_ADR_IN = re.compile(r"\bADR-\d{3,}\b")         # un-prefixed id within a filename
 AMENDMENTS_RE = re.compile(r"(?im)^\s*##\s+amendments\s*$")
 STATUS_RE = re.compile(r"(?im)\bstatus\b\s*[:*\s]+\s*([A-Za-z]+)")
 CONFIG_NAMES = (".spec-arch-governance.yml", ".spec-arch-governance.yaml")
@@ -100,7 +102,16 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def scan_adrs(repo_root: Path, adr_dir: str) -> list[Adr]:
+def qualify(adr_id: str, namespace: str) -> str:
+    """An un-prefixed `ADR-NNN` inherits the repo's namespace (ARCH-ADR-000 §5, slice 002).
+
+    Fully-qualified `<NS>-ADR-NNN` ids are returned unchanged (and their prefix is checked
+    elsewhere). With no namespace known (e.g. an unconfigured source), a bare id is left as-is.
+    """
+    return f"{namespace}-{adr_id}" if namespace and BARE_ADR_RE.match(adr_id) else adr_id
+
+
+def scan_adrs(repo_root: Path, adr_dir: str, namespace: str = "") -> list[Adr]:
     out: list[Adr] = []
     d = repo_root / adr_dir
     if not d.is_dir():
@@ -110,10 +121,15 @@ def scan_adrs(repo_root: Path, adr_dir: str) -> list[Adr]:
         fm, body = split_front_matter(text)
         adr_id = str(fm.get("id") or "").strip()
         if not adr_id:
-            m = ADR_ID_IN.search(p.stem)
-            adr_id = m.group(1) if m else ""
+            m = ADR_ID_IN.search(p.stem)        # prefer a fully-qualified id in the filename
+            if m:
+                adr_id = m.group(1)
+            else:
+                mb = BARE_ADR_IN.search(p.stem)  # else an un-prefixed ADR-NNN
+                adr_id = mb.group(0) if mb else ""
         if not adr_id:
             continue  # not an ADR record (e.g. the README index)
+        adr_id = qualify(adr_id, namespace)
         ns = adr_id.split("-ADR-")[0] if "-ADR-" in adr_id else ""
         out.append(Adr(
             id=adr_id, namespace=ns, status=parse_status(fm, body),
@@ -123,7 +139,7 @@ def scan_adrs(repo_root: Path, adr_dir: str) -> list[Adr]:
     return out
 
 
-def scan_citations(repo_root: Path, specs_dir: str, keys: CitationKeys) -> list[Citation]:
+def scan_citations(repo_root: Path, specs_dir: str, keys: CitationKeys, namespace: str = "") -> list[Citation]:
     cits: list[Citation] = []
     d = repo_root / specs_dir
     if not d.is_dir():
@@ -135,7 +151,9 @@ def scan_citations(repo_root: Path, specs_dir: str, keys: CitationKeys) -> list[
     for p in sorted(d.rglob("plan.md")):
         fm, _ = split_front_matter(p.read_text(encoding="utf-8", errors="replace"))
         for v in _as_list(fm.get(keys.adrs)):
-            cits.append(Citation("cites", v, str(p.relative_to(repo_root))))
+            # a bare `cites: ADR-NNN` is an intra-repo reference → qualify with this repo's
+            # namespace; cross-repo references must already be fully qualified (FR-005).
+            cits.append(Citation("cites", qualify(v, namespace), str(p.relative_to(repo_root))))
     return cits
 
 
@@ -161,22 +179,24 @@ def _source_root(repo_root: Path, src) -> Path:
 
 
 def build_indexes(cfg: GovernanceConfig, repo_root: Path):
-    this_adrs = scan_adrs(repo_root, cfg.adr_dir)
+    this_adrs = scan_adrs(repo_root, cfg.adr_dir, cfg.namespace)
     adr_index = {a.id: a for a in this_adrs}
     spec_index: dict[str, set[str]] = {"": _spec_ids(repo_root, cfg.specs_dir)}
     for src in cfg.sources:
         sroot = _source_root(repo_root, src)
-        s_adr_dir, s_specs_dir = cfg.adr_dir, cfg.specs_dir
+        s_adr_dir, s_specs_dir, s_namespace = cfg.adr_dir, cfg.specs_dir, ""
         for name in CONFIG_NAMES:
             f = sroot / name
             if f.is_file():
                 try:
                     scfg = GovernanceConfig.model_validate(yaml.safe_load(f.read_text()) or {})
-                    s_adr_dir, s_specs_dir = scfg.adr_dir, scfg.specs_dir
+                    s_adr_dir, s_specs_dir, s_namespace = scfg.adr_dir, scfg.specs_dir, scfg.namespace
                 except Exception:
                     pass
                 break
-        for a in scan_adrs(sroot, s_adr_dir):
+        # a source's bare ADR-NNN is qualified with the SOURCE's own namespace, so cross-repo
+        # citations only resolve in the fully-qualified form.
+        for a in scan_adrs(sroot, s_adr_dir, s_namespace):
             adr_index.setdefault(a.id, a)
         spec_index[src.id] = _spec_ids(sroot, s_specs_dir)
     return this_adrs, adr_index, spec_index
@@ -261,7 +281,7 @@ def check_governance_adopted(repo_root, adr_dir, governance_adr) -> list[Issue]:
 
 def validate(cfg: GovernanceConfig, repo_root: Path):
     this_adrs, adr_index, spec_index = build_indexes(cfg, repo_root)
-    cits = scan_citations(repo_root, cfg.specs_dir, cfg.citation_keys)
+    cits = scan_citations(repo_root, cfg.specs_dir, cfg.citation_keys, cfg.namespace)
     runners = {
         "namespace_valid": lambda: check_namespace_valid(this_adrs, cfg.namespace),
         "citations_resolve": lambda: check_citations_resolve(cits, adr_index, spec_index),
