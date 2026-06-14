@@ -55,6 +55,12 @@ provides:
       file: "commands/gate.md"
       description: "before_implement gate: in mode=blocking, refuse to start implementation while any derived_from/cites citation fails; in mode=advisory, warn only. Read-only, fail-closed."
 
+    # The domain sync — reconcile THIS repo against the shared domain manifest (the namespace
+    # registry in the authority repo). Pull-only, dry-run by default; writes only this repo.
+    - name: "speckit.arch-governance.sync"
+      file: "commands/sync.md"
+      description: "Reconcile this repo against its domain manifest (pull its own config from the shared record). Dry-run by default; writes only this repo, never a peer or remote."
+
   # Informational: the per-repo config the install ceremony writes. The CLI does
   # not auto-copy this; `speckit.arch-governance.install` creates it from the
   # interview (config.example.yml is the documented shape).

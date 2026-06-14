@@ -96,3 +96,27 @@ def test_discover_self_auto_detects_sibling_manifest(tmp_path):
     _write(authority)
     found = D.discover_self(tmp_path / "web")  # no hint — scan siblings
     assert found is not None and found[2].name == "web"
+
+
+def test_seed_manifest_writes_then_refuses_to_clobber(tmp_path):
+    authority = tmp_path / "docs"; authority.mkdir()
+    members = [
+        D.Member(name="docs", role="source", namespace="CORE", locator="."),
+        D.Member(name="svc", role="build", namespace="API", locator="../svc"),
+    ]
+    path = D.seed_manifest(authority, members)
+    assert path.is_file()
+    assert len(D.load_manifest(path).members) == 2
+    with pytest.raises(Exception):           # FR-005: never silently overwrite
+        D.seed_manifest(authority, members)
+
+
+def test_detect_siblings_proposes_sibling_repos(tmp_path):
+    authority = tmp_path / "docs"; authority.mkdir()
+    (tmp_path / "svc").mkdir()
+    (tmp_path / "web").mkdir()
+    (tmp_path / ".hidden").mkdir()
+    proposed = dict(D.detect_siblings(authority))
+    assert "svc" in proposed and "web" in proposed
+    assert "docs" not in proposed and ".hidden" not in proposed  # excludes self + hidden
+    assert proposed["svc"] == "../svc"

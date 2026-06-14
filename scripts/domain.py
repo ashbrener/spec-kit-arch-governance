@@ -89,38 +89,69 @@ def member_to_config(manifest: DomainManifest, member: Member, authority_root: P
     return GovernanceConfig(role=member.role, namespace=member.namespace, sources=sources)
 
 
-def _find_manifest(repo_root: Path, hint_locators: list[str]) -> Path | None:
-    """Locate the one manifest: via a given source locator, else by scanning sibling repos."""
-    candidates: list[Path] = []
+def detect_siblings(authority_root) -> list[tuple[str, str]]:
+    """Propose candidate members: sibling repos next to the authority, as (name, locator) pairs.
+
+    Best-effort — excludes the authority itself and hidden dirs. The caller (install) confirms
+    and assigns roles/namespaces; nothing is written here.
+    """
+    authority_root = Path(authority_root).resolve()
+    parent = authority_root.parent
+    out: list[tuple[str, str]] = []
+    if parent.is_dir():
+        for p in sorted(parent.iterdir()):
+            if p.is_dir() and p != authority_root and not p.name.startswith("."):
+                out.append((p.name, f"../{p.name}"))
+    return out
+
+
+def seed_manifest(authority_root, members: list[Member]) -> Path:
+    """Write a new domain manifest in the authority repo. Refuses to overwrite (FR-005)."""
+    path = Path(authority_root) / DOMAIN_NAME
+    if path.exists():
+        raise FileExistsError(f"{DOMAIN_NAME} already exists in {authority_root} — not overwriting (edit it instead).")
+    manifest = DomainManifest(members=members)   # validates uniqueness before writing
+    body = {"version": manifest.version, "members": [m.model_dump() for m in manifest.members]}
+    path.write_text(yaml.safe_dump(body, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def _candidate_dirs(repo_root: Path, hint_locators: list[str]):
+    """Dirs that might hold the manifest: given source locators first, then sibling repos."""
     for loc in hint_locators:
         if loc and "://" not in loc and not loc.endswith(".git"):
-            candidates.append((repo_root / loc).resolve())
+            yield (repo_root / loc).resolve()
     parent = repo_root.resolve().parent
     if parent.is_dir():
-        candidates.extend(sorted(p for p in parent.iterdir() if p.is_dir()))
-    for d in candidates:
-        f = d / DOMAIN_NAME
-        if f.is_file():
-            return f
-    return None
+        for p in sorted(parent.iterdir()):
+            if p.is_dir():
+                yield p
 
 
 def discover_self(repo_root, hint_locators=()):
     """Find the domain manifest and this repo's member entry, or None.
 
-    Returns (manifest, authority_root, member) when a reachable manifest lists a member whose
-    locator resolves to `repo_root`. Pull-only and read-only: it never writes anything.
+    Returns (manifest, authority_root, member) for the first reachable manifest that lists a
+    member whose locator resolves to `repo_root`. Pull-only and read-only. Tolerant: a candidate
+    that doesn't parse, or that doesn't list this repo, is skipped (it isn't *our* manifest) —
+    so an unrelated or malformed sibling manifest never crashes discovery or yields a false match.
     """
     repo_root = Path(repo_root)
-    mf = _find_manifest(repo_root, list(hint_locators))
-    if not mf:
-        return None
-    manifest = load_manifest(mf)
-    authority_root = mf.parent
     target = repo_root.resolve()
-    for m in manifest.members:
-        if "://" in m.locator or m.locator.endswith(".git"):
-            continue  # a remote member can't be "this local repo"
-        if (authority_root / m.locator).resolve() == target:
-            return manifest, authority_root, m
+    seen: set[Path] = set()
+    for d in _candidate_dirs(repo_root, list(hint_locators)):
+        f = d / DOMAIN_NAME
+        if not f.is_file() or f in seen:
+            continue
+        seen.add(f)
+        try:
+            manifest = load_manifest(f)
+        except Exception:
+            continue  # not a usable manifest — ignore, keep looking
+        authority_root = f.parent
+        for m in manifest.members:
+            if "://" in m.locator or m.locator.endswith(".git"):
+                continue  # a remote member can't be "this local repo"
+            if (authority_root / m.locator).resolve() == target:
+                return manifest, authority_root, m
     return None

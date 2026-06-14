@@ -283,6 +283,8 @@ def main(argv=None) -> int:
     p.add_argument("--no-templates", action="store_true",
                    help="Skip patching SpecKit templates with the citation slots (Shape, DESIGN §8).")
     p.add_argument("--source", help="Locator of the source/authority repo (to find the domain manifest).")
+    p.add_argument("--seed", action="store_true",
+                   help="Seed a domain manifest in this (authority) repo, proposing detected sibling repos.")
     args = p.parse_args(sys.argv[1:] if argv is None else list(argv))
 
     repo_root = Path(args.repo).resolve()
@@ -314,6 +316,20 @@ def main(argv=None) -> int:
     if not args.no_templates:
         for f in T.patch_templates(repo_root, cfg.citation_keys):
             print(f"install: born-compliant — added citation slot to {f.relative_to(repo_root)}")
+    if args.seed:
+        siblings = D.detect_siblings(repo_root)
+        # the authority of a multi-repo set is a `source` by definition (others build against it)
+        self_role = "source" if siblings else cfg.role
+        members = [D.Member(name=repo_root.name, role=self_role, namespace=cfg.namespace, locator=".")]
+        for name, locator in siblings:
+            members.append(D.Member(name=name, role="build",
+                                    namespace=suggest_namespace(repo_root.parent / name), locator=locator))
+        try:
+            mpath = D.seed_manifest(repo_root, members)
+            print(f"install: seeded {mpath.relative_to(repo_root)} with {len(members)} member(s) — "
+                  f"review/edit roles & namespaces, then each member self-configures on install.")
+        except (FileExistsError, ValueError) as e:
+            print(f"install: did not seed domain manifest — {e}")
     if answers and cfg.role != "build" and not answers.scaffold_governance and not cfg.governance_adr:
         print("install: note — no governance rulebook set; add one or re-run with a scaffold.")
 
