@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Domain manifest as a first-class contract + reader integration boundary** (slice `specs/004-domain-contract/`) — `docs/adr/domain.schema.json` publishes the `.spec-arch-domain.yml` format as a **versioned, machine-readable schema** beside `vocabulary.json`, so any reader conforms to it as a documented format (not by reverse-engineering a feature folder). A conformance test (`tests/test_domain_schema.py`) **pins the schema to the writer's model** — required member fields == `domain.Member`, `role` enum == the shared role vocabulary — so the published contract can't silently drift from what's enforced; uniqueness stays a documented writer invariant (not faked in the schema). `INTEGRATION.md` states the writer↔reader boundary in one page: what a reader consumes, **topology precedence** (manifest present → source of truth; absent → the reader's own record is the fallback), ownership (writer = topology/namespace, reader = presentation), the manifest stays minimal (no presentation), and conform-in-code / no-runtime-dependency / read-only. Topology-agnostic (FR-009). No new dependency.
+
 ## [1.0.0] — 2026-06-14
 
 First stable release. The full convention is built and dogfooded end-to-end (each slice authored
