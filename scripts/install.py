@@ -39,6 +39,13 @@ import gate as Gate  # noqa: E402
 CONFIG_NAME = ".spec-arch-governance.yml"
 ADR_DIR_CANDIDATES = ("docs/adr", "docs/adrs", "docs/ADRs", "adr", "adrs", "docs/decisions")
 _DROP_TOKENS = {"spec", "kit", "the", "app", "repo", "service"}
+# A namespace identifies a repo's ROLE in the domain, not the project name. When the repo's
+# directory name carries a recognised role token, suggest a prefix from that — so members of a
+# multi-repo set don't all collide on the same project-name prefix (neutral, illustrative).
+_ROLE_HINTS = {
+    "backend": "BE", "frontend": "FE", "docs": "DOCS", "api": "API", "web": "WEB",
+    "core": "CORE", "mobile": "MOB", "worker": "WRK", "cms": "CMS", "infra": "INFRA",
+}
 
 
 # ──────────────────────────── answers ────────────────────────────
@@ -69,6 +76,9 @@ def build_config(a: InstallAnswers) -> GovernanceConfig:
 
 def suggest_namespace(repo_root: Path) -> str:
     toks = [t for t in re.split(r"[^A-Za-z0-9]+", repo_root.resolve().name) if t]
+    for t in toks:                                  # a repo's role beats the project name
+        if t.lower() in _ROLE_HINTS:
+            return _ROLE_HINTS[t.lower()]
     core = [t for t in toks if t.lower() not in _DROP_TOKENS] or toks or ["APP"]
     ns = re.sub(r"[^A-Z0-9]", "", core[0].upper())[:8] or "APP"
     return ns if ns[0].isalpha() else "A" + ns
@@ -128,7 +138,9 @@ def interview(detected: dict) -> InstallAnswers:
     role = _ask_choice("Standalone, or part of a multi-repo project? "
                        "(standalone = one repo that is both source & build)",
                        ("standalone", "source", "build"), "standalone")
-    namespace = (_ask("ADR namespace prefix for THIS repo", detected["namespace"]).upper()
+    namespace = (_ask("ADR namespace prefix identifying THIS repo's role in the project "
+                      "(its position in the set — e.g. a backend, frontend, or docs repo — "
+                      "not the project name)", detected["namespace"]).upper()
                  or detected["namespace"])
     adr_dir = _ask("Where do ADRs live here", detected["adr_dir"])
     specs_dir = _ask("Where do specs live here", detected["specs_dir"])

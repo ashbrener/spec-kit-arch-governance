@@ -91,4 +91,12 @@ When a *reader* (e.g. synthesis) discovers a relation that was not handed to it 
 
 ## Amendments
 
-*(none)*
+### Amendment 1 — namespace by configuration, applied to un-prefixed ids (v0.2.0 · 2026-06-14)
+
+Clarifies [§5](#5-adr-identifiers) without changing the canonical grammar (SemVer **minor** — additive, backward-compatible; the machine-readable [`vocabulary.json`](./vocabulary.json) is bumped to `0.2.0`):
+
+- A repo's **namespace is a property of the repo, declared in its configuration**, and identifies the repo's *role/position* in the domain — not the project's name.
+- An ADR identifier written **un-prefixed** (`ADR-NNN`) is interpreted as belonging to the namespace configured for the repo it lives in — i.e. read as `<namespace>-ADR-NNN`. A repo whose ADRs are stored as plain `ADR-NNN` therefore conforms **without renaming any file**; recognition comes from configuration, not the filename.
+- The **fully-qualified form `<NS>-ADR-NNN` remains canonical** and is required for **cross-repo citations** (a bare `ADR-NNN` is only ever resolved within the repo that owns it; it never matches across a repo boundary). A fully-qualified id whose prefix does not match its repo's namespace is still flagged.
+
+Independent consumers conform to this the same way they conform to the rest of the vocabulary — as a documented format.
