@@ -15,7 +15,7 @@ FIX = Path(__file__).parent / "fixtures"
 
 
 def test_suggest_namespace_is_uppercase_alnum():
-    assert I.suggest_namespace(Path("/x/blok9-backend")) == "BLOK9"
+    assert I.suggest_namespace(Path("/x/acme9-backend")) == "ACME9"
     assert I.suggest_namespace(Path("/x/spec-kit-arch-governance")) == "ARCH"  # drops spec/kit
     ns = I.suggest_namespace(Path("/x/123weird"))
     assert ns[0].isalpha() and ns.isalnum()
