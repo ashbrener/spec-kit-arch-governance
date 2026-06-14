@@ -13,6 +13,8 @@ A standalone, interview-driven SpecKit extension that keeps a project's **specif
 |---|---|
 | [`docs/adr/ARCH-ADR-000-shared-vocabulary.md`](./docs/adr/ARCH-ADR-000-shared-vocabulary.md) | **The contract** this extension enforces — roles, relations, immutable ADR IDs, evidence tiers. |
 | [`docs/adr/vocabulary.json`](./docs/adr/vocabulary.json) | The machine-readable enums (the authoritative form; vendorable by consumers). |
+| [`docs/adr/domain.schema.json`](./docs/adr/domain.schema.json) | The machine-readable **domain-manifest** format — the multi-repo namespace registry a reader conforms to. |
+| [`INTEGRATION.md`](./INTEGRATION.md) | The one-page **writer↔reader boundary** — what a reader consumes, topology precedence, who owns what. |
 | [`DESIGN.md`](./DESIGN.md) | The full design strategy + staged build plan. |
 | [`config.example.yml`](./config.example.yml) | The per-repo config the install interview writes. |
 
