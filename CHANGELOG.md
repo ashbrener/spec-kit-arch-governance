@@ -1,6 +1,12 @@
 # Changelog
 
-## [Unreleased]
+## [1.0.0] — 2026-06-14
+
+First stable release. The full convention is built and dogfooded end-to-end (each slice authored
+through the SpecKit lifecycle, TDD): born-compliant templates, the read-only citation validator +
+lifecycle hooks, the blocking enforcement gate, namespace-by-role with zero-rename ADR adoption,
+and the multi-repo domain manifest + `sync` (self-configuring, no fleet manager required).
+Advisory remains the default; blocking is a guarded per-repo flip.
 
 ### Added
 - **`ARCH-ADR-000` — the shared vocabulary** (`docs/adr/`), the founding ruling this extension enforces and that consumers (e.g. `spec-kit-synthesis`) conform to as a documented format. Folded in from the former standalone `spec-kit-vocabulary` repo: with exactly two consumers (both first-party), a separate contract repo wasn't justified — conform-in-code, define-here.
@@ -15,4 +21,4 @@
 - **Namespace by repo role + zero-rename ADR adoption** (slice `specs/002-namespace-by-role/`) — a repo's configured `namespace` now **qualifies un-prefixed `ADR-NNN` identifiers** as `<namespace>-ADR-NNN`, so a repo whose ADRs are stored the common unprefixed way adopts the convention with **zero file renames**. Fully-qualified ids stay canonical (and a mismatched prefix is still flagged); **cross-repo citations must be fully qualified** (a bare id never matches across a repo boundary). The install interview now frames the namespace as the repo's **role** in the domain (not the project name) and suggests a role-based default. Recorded as **Amendment 1 (v0.2.0)** of `ARCH-ADR-000` (appended below `## Amendments`; frozen body untouched) with `vocabulary.json` bumped to match. Topology-agnostic guardrail (no real consumer names anywhere) is encoded as a checkable requirement (FR-009).
 
 ### Status
-Engine built and dogfooding: **Shape · Teeth · Interview** done (`DESIGN.md` §10 steps 2–4), the **lifecycle hooks** (§8) wired via `extension.yml`, and **blocking enforcement** (step 6) available — advisory remains the default; flipping to blocking is a guarded per-repo decision. Remaining: tag 1.0.0; package fleet glue.
+**1.0.0** — the whole build plan (`DESIGN.md` §10) is delivered: Policy · Shape · Teeth · Interview · lifecycle hooks · blocking enforcement · namespace-by-role · domain manifest + sync. Next: prove on a real consumer and submit to the community catalog.
