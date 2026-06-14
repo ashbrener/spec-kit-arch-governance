@@ -70,3 +70,29 @@ def test_member_lookup_and_missing(tmp_path):
     m = D.load_manifest(_write(tmp_path))
     assert m.member("web").namespace == "WEB"
     assert m.member("absent") is None
+
+
+def test_discover_self_identifies_the_member(tmp_path):
+    authority = tmp_path / "docs"; authority.mkdir()
+    (tmp_path / "service").mkdir()
+    _write(authority)
+    found = D.discover_self(tmp_path / "service", hint_locators=["../docs"])
+    assert found is not None
+    manifest, auth_root, member = found
+    assert member.name == "service"
+    assert auth_root.resolve() == authority.resolve()
+
+
+def test_discover_self_none_when_repo_not_a_member(tmp_path):
+    authority = tmp_path / "docs"; authority.mkdir()
+    (tmp_path / "other").mkdir()
+    _write(authority)
+    assert D.discover_self(tmp_path / "other", hint_locators=["../docs"]) is None
+
+
+def test_discover_self_auto_detects_sibling_manifest(tmp_path):
+    authority = tmp_path / "docs"; authority.mkdir()
+    (tmp_path / "web").mkdir()
+    _write(authority)
+    found = D.discover_self(tmp_path / "web")  # no hint — scan siblings
+    assert found is not None and found[2].name == "web"

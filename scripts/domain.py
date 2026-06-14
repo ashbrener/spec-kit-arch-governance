@@ -87,3 +87,40 @@ def member_to_config(manifest: DomainManifest, member: Member, authority_root: P
         if s.name != member.name
     ]
     return GovernanceConfig(role=member.role, namespace=member.namespace, sources=sources)
+
+
+def _find_manifest(repo_root: Path, hint_locators: list[str]) -> Path | None:
+    """Locate the one manifest: via a given source locator, else by scanning sibling repos."""
+    candidates: list[Path] = []
+    for loc in hint_locators:
+        if loc and "://" not in loc and not loc.endswith(".git"):
+            candidates.append((repo_root / loc).resolve())
+    parent = repo_root.resolve().parent
+    if parent.is_dir():
+        candidates.extend(sorted(p for p in parent.iterdir() if p.is_dir()))
+    for d in candidates:
+        f = d / DOMAIN_NAME
+        if f.is_file():
+            return f
+    return None
+
+
+def discover_self(repo_root, hint_locators=()):
+    """Find the domain manifest and this repo's member entry, or None.
+
+    Returns (manifest, authority_root, member) when a reachable manifest lists a member whose
+    locator resolves to `repo_root`. Pull-only and read-only: it never writes anything.
+    """
+    repo_root = Path(repo_root)
+    mf = _find_manifest(repo_root, list(hint_locators))
+    if not mf:
+        return None
+    manifest = load_manifest(mf)
+    authority_root = mf.parent
+    target = repo_root.resolve()
+    for m in manifest.members:
+        if "://" in m.locator or m.locator.endswith(".git"):
+            continue  # a remote member can't be "this local repo"
+        if (authority_root / m.locator).resolve() == target:
+            return manifest, authority_root, m
+    return None

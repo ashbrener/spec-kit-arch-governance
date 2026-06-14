@@ -35,6 +35,7 @@ from config import GovernanceConfig, Role, Source  # noqa: E402
 import validate as V  # noqa: E402
 import templates as T  # noqa: E402
 import gate as Gate  # noqa: E402
+import domain as D  # noqa: E402
 
 CONFIG_NAME = ".spec-arch-governance.yml"
 ADR_DIR_CANDIDATES = ("docs/adr", "docs/adrs", "docs/ADRs", "adr", "adrs", "docs/decisions")
@@ -281,17 +282,30 @@ def main(argv=None) -> int:
     p.add_argument("--no-validate", action="store_true", help="Skip the post-install validate run.")
     p.add_argument("--no-templates", action="store_true",
                    help="Skip patching SpecKit templates with the citation slots (Shape, DESIGN §8).")
+    p.add_argument("--source", help="Locator of the source/authority repo (to find the domain manifest).")
     args = p.parse_args(sys.argv[1:] if argv is None else list(argv))
 
     repo_root = Path(args.repo).resolve()
     if not repo_root.is_dir():
         raise SystemExit(f"install: {repo_root} is not a directory.")
     detected = detect(repo_root)
-    answers = resolve_answers(args, detected)
-    cfg = build_config(answers)
+    # Pull: if a reachable domain manifest lists this repo, self-configure from it with no
+    # interview (the manifest is the pre-answer source — DESIGN §9, no fleet manager required).
+    pulled = None
+    if not args.answers and not args.non_interactive:
+        pulled = D.discover_self(repo_root, hint_locators=[args.source] if args.source else [])
+    answers: Optional[InstallAnswers] = None
+    if pulled:
+        manifest, authority_root, member = pulled
+        cfg = D.member_to_config(manifest, member, authority_root)
+        print(f"install: found domain manifest — configuring member '{member.name}' from it "
+              f"(role={cfg.role} ns={cfg.namespace}); no interview needed.")
+    else:
+        answers = resolve_answers(args, detected)
+        cfg = build_config(answers)
     guard_blocking_transition(cfg, repo_root)
     cfg_path = write_config(cfg, repo_root, force=args.force)
-    scaffolded = scaffold_governance(answers, repo_root)
+    scaffolded = scaffold_governance(answers, repo_root) if answers else []
 
     print(f"install: wrote {cfg_path.relative_to(repo_root)}  "
           f"(role={cfg.role} ns={cfg.namespace} adr_dir={cfg.adr_dir} specs_dir={cfg.specs_dir} mode={cfg.mode})")
@@ -300,7 +314,7 @@ def main(argv=None) -> int:
     if not args.no_templates:
         for f in T.patch_templates(repo_root, cfg.citation_keys):
             print(f"install: born-compliant — added citation slot to {f.relative_to(repo_root)}")
-    if cfg.role != "build" and not answers.scaffold_governance and not cfg.governance_adr:
+    if answers and cfg.role != "build" and not answers.scaffold_governance and not cfg.governance_adr:
         print("install: note — no governance rulebook set; add one or re-run with a scaffold.")
 
     if not args.no_validate:
