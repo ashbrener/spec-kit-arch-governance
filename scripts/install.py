@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import GovernanceConfig, Role, Source  # noqa: E402
 import validate as V  # noqa: E402
 import templates as T  # noqa: E402
+import gate as Gate  # noqa: E402
 
 CONFIG_NAME = ".spec-arch-governance.yml"
 ADR_DIR_CANDIDATES = ("docs/adr", "docs/adrs", "docs/ADRs", "adr", "adrs", "docs/decisions")
@@ -174,6 +175,23 @@ def config_to_yaml(cfg: GovernanceConfig) -> str:
     return yaml.safe_dump(d, sort_keys=False, default_flow_style=False)
 
 
+def guard_blocking_transition(cfg: GovernanceConfig, repo_root: Path) -> None:
+    """FR-006: refuse to persist mode=blocking while the repo has failing citations.
+
+    Advisory-before-blocking (ARCH-ADR-000): a repo flips to blocking only once it already
+    validates clean, so the first blocking run can never be the one that discovers failures.
+    """
+    if cfg.mode != "blocking":
+        return
+    decision = Gate.gate_decision(cfg, repo_root)
+    if decision.blocks:
+        raise SystemExit(
+            f"install: refusing to enable mode=blocking — {len(decision.issues)} failing "
+            f"citation issue(s) must be fixed first (or install with mode=advisory):\n"
+            + Gate.render(decision, cfg)
+        )
+
+
 def write_config(cfg: GovernanceConfig, repo_root: Path, force: bool = False) -> Path:
     path = repo_root / CONFIG_NAME
     if path.exists() and not force:
@@ -259,6 +277,7 @@ def main(argv=None) -> int:
     detected = detect(repo_root)
     answers = resolve_answers(args, detected)
     cfg = build_config(answers)
+    guard_blocking_transition(cfg, repo_root)
     cfg_path = write_config(cfg, repo_root, force=args.force)
     scaffolded = scaffold_governance(answers, repo_root)
 

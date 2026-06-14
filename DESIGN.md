@@ -123,8 +123,8 @@ The principle: **the extension asks; a fleet manager can answer on your behalf.*
 2. **Shape** — front-matter slots in SpecKit templates. ✅ *Done: `scripts/templates.py` prepends the `derived_from:`/`cites:` citation slots to a project's `.specify/templates/{spec,plan}-template.md` (idempotent, non-destructive), so every generated spec/plan is born-compliant. Wired into the install ceremony; `--no-templates` opts out.*
 3. **Teeth** — one validator, called from each repo's CI as a merge gate (advisory). ✅ *Done: `scripts/validate.py` — read-only, the five ARCH-ADR-000 checks.*
 4. **Interview** — the install ceremony that writes per-repo config. ✅ *Done: `scripts/install.py` — detect → interview → write → scaffold → patch templates → validate.*
-5. **Prove** — run one real build slice end-to-end under the convention.
-6. **Then** — flip `mode: blocking` per repo and tag 1.0.0. Package any fleet-adoption glue (version pin, pre-answered interview) *last*.
+5. **Prove** — run one real build slice end-to-end under the convention. 🟡 *In progress: this repo self-hosts on SpecKit and carries the first spec-driven slice [`specs/001-blocking-enforcement-gate`](./specs/001-blocking-enforcement-gate/) (spec → plan → tasks → implemented). The validator now runs on a real citation (`cites: ARCH-ADR-000` → resolves, current → PASS). Still to do: prove the consumer experience on a separate governed repo.*
+6. **Then** — flip `mode: blocking` per repo and tag 1.0.0. 🟡 *Mechanism done: `scripts/gate.py` + the `before_implement` hook enforce blocking, and the install ceremony refuses to flip a repo that isn't already clean (`guard_blocking_transition`, FR-006). Advisory stays the default; flipping is a deliberate, guarded per-repo decision. Remaining: tag 1.0.0; package any fleet-adoption glue (version pin, pre-answered interview) *last*.*
 
 ## 11. Anti-goals / guardrails
 

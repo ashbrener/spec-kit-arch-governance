@@ -109,6 +109,35 @@ def test_install_no_templates_flag_skips_patching(tmp_path):
     assert (d / "spec-template.md").read_text() == before  # untouched
 
 
+def test_install_refuses_blocking_when_citations_fail(tmp_path):
+    """US2/FR-006: refuse to persist mode=blocking while citations are broken."""
+    (tmp_path / "specs" / "001-x").mkdir(parents=True)
+    (tmp_path / "specs" / "001-x" / "spec.md").write_text("---\nderived_from: []\n---\n# spec\n")
+    (tmp_path / "specs" / "001-x" / "plan.md").write_text("---\ncites:\n  - APP-ADR-404\n---\n# plan\n")
+    answers = tmp_path / "answers.yml"
+    answers.write_text(yaml.safe_dump({"role": "standalone", "namespace": "APP", "mode": "blocking"}))
+    try:
+        I.main([str(tmp_path), "--answers", str(answers)])
+        assert False, "should refuse blocking with failing citations"
+    except SystemExit as e:
+        assert "APP-ADR-404" in str(e)  # names the offending citation
+    assert not (tmp_path / I.CONFIG_NAME).exists()  # nothing persisted
+
+
+def test_install_allows_blocking_when_clean(tmp_path):
+    """The flip succeeds from a clean state (scaffolds the governance ADR, no bad cites)."""
+    (tmp_path / "specs" / "001-x").mkdir(parents=True)
+    (tmp_path / "specs" / "001-x" / "spec.md").write_text("---\nderived_from: []\n---\n# spec\n")
+    (tmp_path / "specs" / "001-x" / "plan.md").write_text("---\ncites: []\n---\n# plan\n")
+    answers = tmp_path / "answers.yml"
+    answers.write_text(yaml.safe_dump({
+        "role": "standalone", "namespace": "APP", "mode": "blocking", "scaffold_governance": True,
+    }))
+    assert I.main([str(tmp_path), "--answers", str(answers)]) == 0
+    loaded = GovernanceConfig.model_validate(yaml.safe_load((tmp_path / I.CONFIG_NAME).read_text()))
+    assert loaded.mode == "blocking"
+
+
 def test_interview_drives_answers(monkeypatch):
     feed = iter(["standalone", "app", "docs/adr", "specs", "n", "y", "advisory", "filesystem"])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(feed))

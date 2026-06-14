@@ -48,6 +48,13 @@ provides:
       file: "commands/install.md"
       description: "Install ceremony: interview topology (source/build/standalone), write .spec-arch-governance.yml, scaffold the governance ADR, make templates born-compliant."
 
+    # The gate — the read-only validator as a HALT decision at the implementation
+    # boundary. In mode=blocking it refuses to start implementation while citations
+    # fail; in mode=advisory it only warns. Same engine as validate, different verb.
+    - name: "speckit.arch-governance.gate"
+      file: "commands/gate.md"
+      description: "before_implement gate: in mode=blocking, refuse to start implementation while any derived_from/cites citation fails; in mode=advisory, warn only. Read-only, fail-closed."
+
   # Informational: the per-repo config the install ceremony writes. The CLI does
   # not auto-copy this; `speckit.arch-governance.install` creates it from the
   # interview (config.example.yml is the documented shape).
@@ -73,6 +80,13 @@ hooks:
     command: "speckit.arch-governance.validate"
     optional: false
     description: "Validate the new plan's cites against the ADRs (advisory; read-only)."
+    condition: null
+  # The teeth bite here. In mode=advisory this only warns (never blocks /speckit-implement);
+  # in mode=blocking it HALTs implementation while any citation fails. Read-only either way.
+  before_implement:
+    command: "speckit.arch-governance.gate"
+    optional: false
+    description: "Gate /speckit-implement on citation integrity — HALT in mode=blocking, warn in mode=advisory."
     condition: null
 
 tags:

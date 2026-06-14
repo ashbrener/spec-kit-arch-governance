@@ -60,6 +60,16 @@ def test_hooks_are_valid_events_pointing_at_declared_commands():
         assert spec["command"] in declared, f"hook {event} points at undeclared command {spec['command']!r}"
 
 
+def test_before_implement_gate_is_wired():
+    """Slice 001: a before_implement hook points at the gate command."""
+    m = _manifest()
+    names = {c["name"] for c in m["provides"]["commands"]}
+    assert "speckit.arch-governance.gate" in names
+    hooks = m["hooks"]
+    assert "before_implement" in hooks
+    assert hooks["before_implement"]["command"] == "speckit.arch-governance.gate"
+
+
 def test_lifecycle_validates_specs_and_plans():
     """The whole point of §8: a new spec and a new plan both ride into the validator."""
     hooks = _manifest()["hooks"]
