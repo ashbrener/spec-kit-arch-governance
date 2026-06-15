@@ -121,19 +121,19 @@ One shared **domain manifest** in the source/authority repo is the namespace reg
 ```mermaid
 flowchart TD
     subgraph DOMAIN["governance domain"]
-        DOCS["docs  (source)<br/>namespace: CORE<br/>.spec-arch-domain.yml ← the registry"]
-        BE["backend  (build)<br/>namespace: API"]
-        FE["frontend  (build)<br/>namespace: WEB"]
+        SRC["docs  (source)<br/>namespace: CORE<br/>.spec-arch-domain.yml ← the registry"]
+        API["backend  (build)<br/>namespace: API"]
+        WEB["frontend  (build)<br/>namespace: WEB"]
     end
-    DOCS -. "members[] (name·role·namespace·locator)" .-> BE
-    DOCS -. "members[]" .-> FE
-    BE -->|"cites: CORE-ADR-007 (qualified, cross-repo)"| DOCS
-    FE -->|"derived_from: docs:NNN-feature"| DOCS
+    SRC -. "members[] (name·role·namespace·locator)" .-> API
+    SRC -. "members[]" .-> WEB
+    API -->|"cites: CORE-ADR-007 (qualified, cross-repo)"| SRC
+    WEB -->|"derived_from: docs:NNN-feature"| SRC
 
     classDef s fill:#efe4f0,stroke:#6a3a6f,color:#17150f
     classDef b fill:#e2ece7,stroke:#1f5048,color:#17150f
-    class DOCS s
-    class BE,FE b
+    class SRC s
+    class API,WEB b
 ```
 
 1. **Seed the manifest** once in the source repo (`.spec-arch-domain.yml`, listing each member’s `name · role · namespace · locator`).
