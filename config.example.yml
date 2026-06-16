@@ -23,9 +23,13 @@ sources:
     role: source
 
 # Which front-matter key carries which relation (vocabulary: relations).
+# The full slot format — where slots live + the derived_from/cites value grammars — is codified
+# (and vendorable by readers) in docs/adr/vocabulary.json → `citation_slots` (ARCH-ADR-000 Amendment 2).
 citation_keys:
   source_specs: derived_from   # on spec.md  — which source specs this is derived from
+                               #   cross-repo form: <source-id>:<feature> (e.g. core:002-architecture)
   adrs: cites                  # on plan.md  — which ADRs this plan is bound by
+                               #   cross-repo form: qualified <SOURCE-NS>-ADR-NNN (e.g. CORE-ADR-007)
 
 # The read-only validator contract. Each check maps to a vocabulary guarantee.
 checks:
