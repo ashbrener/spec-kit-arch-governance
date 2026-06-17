@@ -279,6 +279,34 @@ def check_governance_adopted(repo_root, adr_dir, governance_adr) -> list[Issue]:
     return []
 
 
+def coverage_report(cfg: GovernanceConfig, repo_root: Path) -> list[Issue]:
+    """Advisory: feature specs whose `derived_from` AND `cites` slots are both empty/absent.
+
+    These are orphans — born-compliant but uncited, so a reader has nothing to meld them on.
+    Always `note`-severity: informational, NEVER a failure (distinct from a *broken* citation,
+    which the resolve/current checks own). Read-only.
+    """
+    out: list[Issue] = []
+    d = repo_root / cfg.specs_dir
+    if not d.is_dir():
+        return out
+    feature_dirs = {p.parent for p in d.rglob("spec.md")} | {p.parent for p in d.rglob("plan.md")}
+    for fdir in sorted(feature_dirs):
+        derived, cited = [], []
+        sp, pl = fdir / "spec.md", fdir / "plan.md"
+        if sp.is_file():
+            fm, _ = split_front_matter(sp.read_text(encoding="utf-8", errors="replace"))
+            derived = _as_list(fm.get(cfg.citation_keys.source_specs))
+        if pl.is_file():
+            fm, _ = split_front_matter(pl.read_text(encoding="utf-8", errors="replace"))
+            cited = _as_list(fm.get(cfg.citation_keys.adrs))
+        if not derived and not cited:
+            out.append(Issue("citation_coverage",
+                             f"feature {fdir.name!r} has no derived_from/cites — orphan (nothing to meld)",
+                             str(fdir.relative_to(repo_root)), severity="note"))
+    return out
+
+
 def validate(cfg: GovernanceConfig, repo_root: Path):
     this_adrs, adr_index, spec_index = build_indexes(cfg, repo_root)
     cits = scan_citations(repo_root, cfg.specs_dir, cfg.citation_keys, cfg.namespace)
@@ -293,6 +321,7 @@ def validate(cfg: GovernanceConfig, repo_root: Path):
     for name, fn in runners.items():
         if getattr(cfg.checks, name):
             issues.extend(fn())
+    issues.extend(coverage_report(cfg, repo_root))   # advisory notes; never fail (see coverage_report)
     return issues, {"adrs": len(this_adrs), "citations": len(cits)}
 
 

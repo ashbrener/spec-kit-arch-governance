@@ -100,3 +100,13 @@ Clarifies [§5](#5-adr-identifiers) without changing the canonical grammar (SemV
 - The **fully-qualified form `<NS>-ADR-NNN` remains canonical** and is required for **cross-repo citations** (a bare `ADR-NNN` is only ever resolved within the repo that owns it; it never matches across a repo boundary). A fully-qualified id whose prefix does not match its repo's namespace is still flagged.
 
 Independent consumers conform to this the same way they conform to the rest of the vocabulary — as a documented format.
+
+### Amendment 2 — citation-slot format codified for readers (v0.3.0 · 2026-06-16)
+
+Codifies the **citation slots** (the `derived_from` / `cites` relations of [§4](#4-relations)) as a first-class, machine-readable part of the vocabulary, so a reader can vendor and parse them identically to the writer (SemVer **minor** — additive; [`vocabulary.json`](./vocabulary.json) bumped to `0.3.0`, gaining a `citation_slots` section):
+
+- **Where the slots live:** `derived_from` in `spec.md` front-matter, `cites` in `plan.md` front-matter. The key names are **configurable** per repo via `citation_keys` (defaults `derived_from` / `cites`); a reader honours the repo's declared keys.
+- **`derived_from` value grammar:** cross-repo `<source-member-id>:<spec-feature-id>` (the colon marks cross-repo; `source-member-id` = the domain-manifest member name, `spec-feature-id` = the feature dir under the source's `specs_dir`); intra-repo is the bare `<spec-feature-id>` (no colon).
+- **`cites` value grammar:** `^([A-Z][A-Z0-9]*-)?ADR-\d{3,}$`; cross-repo MUST be the qualified `<source-NS>-ADR-NNN`; intra-repo may be bare (per Amendment 1).
+
+The published `citation_slots` block is pinned to the validator's actual parsing by a conformance test, so the contract cannot drift from enforcement. (Empty slots are surfaced as advisory **coverage** notes — informational, never a failure.)
