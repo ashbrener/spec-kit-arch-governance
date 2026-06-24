@@ -110,3 +110,10 @@ Codifies the **citation slots** (the `derived_from` / `cites` relations of [§4]
 - **`cites` value grammar:** `^([A-Z][A-Z0-9]*-)?ADR-\d{3,}$`; cross-repo MUST be the qualified `<source-NS>-ADR-NNN`; intra-repo may be bare (per Amendment 1).
 
 The published `citation_slots` block is pinned to the validator's actual parsing by a conformance test, so the contract cannot drift from enforcement. (Empty slots are surfaced as advisory **coverage** notes — informational, never a failure.)
+
+### Amendment 3 — when the immutability freeze begins (editorial · 2026-06-24)
+
+Clarifies [§5](#5-adr-identifiers) "*Immutable once accepted*" without changing the canonical grammar (editorial — purely explanatory; the machine-readable [`vocabulary.json`](./vocabulary.json) is **unchanged at `0.3.0`**):
+
+- The `adr_immutability` check freezes an accepted ADR's body against its **first committed version**, not against some recovered "moment of acceptance" (git carries no such signal cheaply). Because a number is allocated *at* acceptance (§5 — a not-yet-accepted decision occupies none), the intended convention is to **commit an ADR at acceptance**, so its first commit *is* its acceptance and the two baselines coincide. A still-`Proposed` draft may be edited freely before that first commit.
+- A consequence: if a project does commit ADRs while `Proposed` and later edits the frozen body before flipping to `Accepted`, the check can flag a legitimate pre-acceptance edit. That is why immutability is **advisory by default** (`mode: advisory`) and flips to blocking only on a proven-clean repo — the finding asks a human to confirm an in-place edit rather than asserting tamper. A genuine decision change is always a *new* superseding ADR, never an edit.
