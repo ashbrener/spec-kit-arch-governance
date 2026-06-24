@@ -20,7 +20,7 @@ extension:
   # 1.0.0 — the full convention is built and dogfooded: born-compliant templates, the read-only
   # validator + lifecycle hooks, the blocking gate, namespace-by-role (zero-rename), and the
   # multi-repo domain manifest + sync. Advisory remains the default; blocking is a guarded flip.
-  version: "1.0.0"
+  version: "1.0.1"
   description: "Keep specs, code & ADRs in sync — born-compliant citation slots + a read-only fail-closed validator on every spec and plan."
   author: "Ash Brener"
   repository: "https://github.com/ashbrener/spec-kit-arch-governance"

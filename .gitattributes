@@ -1,0 +1,10 @@
+# Release-archive hygiene: keep `git archive` (the extension package) lean.
+# These dev-only paths are excluded from the exported tarball so a consumer
+# installing the extension gets the extension — not this repo's own SpecKit
+# scaffold, agent config, spec history, virtualenv, or CI.
+/.specify       export-ignore
+/.claude        export-ignore
+/specs          export-ignore
+/.venv          export-ignore
+/.github        export-ignore
+/HANDOFF.md     export-ignore

@@ -2,7 +2,20 @@
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-06-24
+
+Release-packaging + documentation polish on top of `1.0.0`. No behaviour change to the validator,
+the gate, install, or sync; no contract change (`vocabulary.json` stays `0.3.0`). Folds in the
+post-`1.0.0` interop work (slices 004–005) plus two release-readiness items.
+
 ### Added
+- **Lean release archive** (`.gitattributes`) — marks the repo's dev-only scaffold (`.specify/`, `.claude/`, `specs/`, `.venv/`, `.github/`, `HANDOFF.md`) `export-ignore`, so `git archive` (the packaged extension a consumer installs) ships the extension itself — commands, scripts, the `ARCH-ADR-000` contract, README/INTEGRATION/config — and not this repo's own SpecKit history or CI.
+- **`ARCH-ADR-000` Amendment 3 — when the immutability freeze begins** (editorial; `vocabulary.json` unchanged at `0.3.0`) — clarifies §5: the `adr_immutability` check freezes an accepted ADR against its **first committed version** (git carries no cheap "moment of acceptance" signal), so the convention is to **commit an ADR at acceptance** (numbers are allocated at acceptance per §5) — first-commit then *is* acceptance. Documents the consequence honestly: a project that commits `Proposed` ADRs and edits the frozen body before accepting can see a legitimate-edit flag, which is why immutability is **advisory by default** and flips to blocking only on a proven-clean repo. Pins the doc to the actual code behaviour (no freeze-from-acceptance machinery, no severity change) rather than overstating it.
+
+### Changed
+- Extension manifest version `1.0.0` → `1.0.1`.
+
+### Added (since 1.0.0, interop)
 - **Citation-slot interop contract + advisory coverage report** (slice `specs/005-citation-contract/`) — codifies the citation slots as a first-class, vendorable part of the vocabulary: `docs/adr/vocabulary.json` gains a `citation_slots` section (where `derived_from`/`cites` live; the configurable keys + defaults; the `derived_from` colon-discriminated cross/intra-repo grammar; the qualified-vs-bare `cites` grammar) and is bumped **0.2.0 → 0.3.0**, recorded as **ARCH-ADR-000 Amendment 2** (appended below `## Amendments`; frozen body untouched). A conformance test (`tests/test_citation_contract.py`) **pins the codified grammar to the validator's actual parsing** (default keys == `CitationKeys()`, the `cites` pattern == the validator's, the colon-discriminator == `_resolve_spec`) so the published contract can't drift from enforcement — a reader (e.g. spec-kit-synthesis) vendors `0.3.0` and parses slots identically. Adds an **advisory citation-coverage report** (`coverage_report()` in `scripts/validate.py`): feature specs with empty `derived_from`/`cites` are surfaced as `note`-severity orphans that **never fail the build** (distinct from a *broken* citation). No new dependency; no change to how citations resolve.
 - **Domain manifest as a first-class contract + reader integration boundary** (slice `specs/004-domain-contract/`) — `docs/adr/domain.schema.json` publishes the `.spec-arch-domain.yml` format as a **versioned, machine-readable schema** beside `vocabulary.json`, so any reader conforms to it as a documented format (not by reverse-engineering a feature folder). A conformance test (`tests/test_domain_schema.py`) **pins the schema to the writer's model** — required member fields == `domain.Member`, `role` enum == the shared role vocabulary — so the published contract can't silently drift from what's enforced; uniqueness stays a documented writer invariant (not faked in the schema). `INTEGRATION.md` states the writer↔reader boundary in one page: what a reader consumes, **topology precedence** (manifest present → source of truth; absent → the reader's own record is the fallback), ownership (writer = topology/namespace, reader = presentation), the manifest stays minimal (no presentation), and conform-in-code / no-runtime-dependency / read-only. Topology-agnostic (FR-009). No new dependency.
 
