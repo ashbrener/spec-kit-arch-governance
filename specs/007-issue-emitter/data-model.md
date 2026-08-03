@@ -71,7 +71,7 @@ Ordered rows (sorted by pin key), each `(fact-or-record, disposition, detail)`:
 
 Apply-time adjustments (R4, surfaced in the report, never errors):
 `update` → **respect-and-note** when reality-check finds human-closed + still stale (one comment,
-record `dismissed`); `resolve` → **record-only** when already human-closed.
+record `dismissed`); `resolve` → **record-only** when already human-closed; `get_state` not-found (issue deleted repo-side) → still-stale rows become **create** (new lifecycle), resolved rows become record-only — surfaced in the report, never a crash.
 
 **Sidecar write discipline**: atomic rewrite (tmp + replace) after EACH successful row — a
 failure at row K leaves rows <K recorded exactly (FR-009 partial-success contract).

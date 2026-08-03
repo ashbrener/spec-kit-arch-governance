@@ -52,7 +52,7 @@ An author reviews the upstream change and runs `repin --apply`; the staleness fa
 
 **Why this priority**: A mirror that only ever adds is a graveyard. Reflecting resolution is what keeps the tracker truthful — but it is only valuable once creation (US1) and dedup (US2) exist.
 
-**Independent Test**: Mirror a fact, then repin it. Next `--apply`: the issue is reconciled per lifecycle, with a comment naming the resolution (new pinned digest). No other issue is touched.
+**Independent Test**: Mirror a fact, then repin it. Next `--apply`: the issue is closed with an audit comment naming the resolution (the new pinned digest). No other issue is touched.
 
 **Acceptance Scenarios**:
 
@@ -83,7 +83,7 @@ The tracker is unreachable, the operator's credential is missing, or the API rat
 - Upstream moves a second time after mirroring: the fact's identity is unchanged (same citation), the CONTENT changed — update, not duplicate (US2 scenario 2).
 - A human edits the mirrored issue's body: the emitter's next update overwrites only what it owns (deterministic body), per the ratified update semantics; it never deletes an issue.
 - A human closes the issue while the fact is still stale: the dismissal is recorded, one continued-staleness comment is added, and the issue is never re-opened.
-- The mirror record references an issue that no longer exists (deleted repo-side): surfaced as an explicit reconciliation in the plan, never a crash.
+- The mirror record references an issue that no longer exists (deleted repo-side): detectable only at apply time (the offline plan cannot see the tracker); the apply report surfaces it explicitly — still-stale → a fresh issue is created (new lifecycle), resolved → record-only — never a crash.
 - The mirror record file is present-but-broken: typed load error, non-zero exit, no emission — never a guessed-empty state that would duplicate every issue (the pins `PinLoadError` precedent).
 - Two governed repos in one domain both opt in: each mirrors only its OWN staleness facts to its OWN configured tracker; the emitter never emits for a peer.
 - Config enables the emitter but names no tracker repository: config validation error at load time, before any planning.
@@ -105,7 +105,7 @@ The tracker is unreachable, the operator's credential is missing, or the API rat
 - **FR-001**: The emitter MUST be absent-by-default: a repo whose config does not opt in gets byte-identical pre-007 behavior from every existing verb, and NO code path in the repo performs network access.
 - **FR-002**: Opt-in MUST be an explicit configuration section validated strictly (unknown or malformed keys are load-time errors, per the repo's config doctrine), naming at minimum the enabled flag (default false) and the target tracker repository. Enabling without a target MUST be a validation error.
 - **FR-003**: The emitter MUST source its facts from the same single validate engine run that enforcement consumes, and MUST mirror exactly the determinate failure-severity `citations_fresh` findings — never notes, never findings of other checks, never re-detected state of its own.
-- **FR-004**: The default invocation MUST be a dry-run that performs zero network operations and zero mutations anywhere, printing a deterministic plan assigning every current fact and every recorded mirror one disposition: create, update, reconcile-resolved, up-to-date, or skip (with reason). `--apply` MUST perform exactly the planned dispositions.
+- **FR-004**: The default invocation MUST be a dry-run that performs zero network operations and zero mutations anywhere, printing a deterministic plan assigning every current fact and every recorded mirror one disposition: create, update, resolve, up-to-date, or skip (with reason). `--apply` MUST perform exactly the planned dispositions.
 - **FR-005**: Every staleness fact MUST have a stable identity — the pin key (citing file + relation + citation value) — mirrored as exactly one issue per fact. Re-running with unchanged facts MUST create nothing and change nothing. A fact whose content state moved again MUST update its existing issue, never open a second.
 - **FR-006**: The emitter MUST record its mirrors in a tracked sidecar written only by the emitter's apply path, recording per mirrored fact: identity, issue reference, and last-emitted content state. A present-but-broken sidecar MUST be a typed load error and a non-zero exit before any emission (never a guessed-empty state).
 - **FR-007**: When a recorded mirror's fact is no longer among the current facts (repinned, upstream reverted, citation removed), `--apply` MUST close the issue with an audit comment naming the resolution (the new pin state or the citation's removal), and update the sidecar accordingly.
