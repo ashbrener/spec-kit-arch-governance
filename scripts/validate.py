@@ -1,7 +1,7 @@
 """validate.py — the spec-kit-arch-governance teeth: a read-only citation validator.
 
 Reads a per-repo `.spec-arch-governance.yml`, scans the repo's specs + ADRs, and runs the
-five checks defined by ARCH-ADR-000 (docs/adr). It NEVER mutates a repo. Output is
+six checks defined by ARCH-ADR-000 (docs/adr). It NEVER mutates a repo. Output is
 `PASS` / `ADVISORY (n)` / `FAIL (n)`; exit is 0 unless mode=blocking has failing issues.
 
     uv run python scripts/validate.py <repo-dir-or-config.yml>
@@ -12,6 +12,8 @@ The checks (DESIGN §7):
   citations_current  — cited ADRs aren't Superseded / Deprecated
   adr_immutability   — accepted ADR bodies (above '## Amendments') unchanged since first commit
   governance_adopted — the ADR dir's README references the governance ADR
+  citations_fresh    — pinned citations still match the cited artifact's current content state
+                       (slice 006; stale = failure, unpinned/orphaned/indeterminate = note)
 """
 
 from __future__ import annotations
@@ -26,6 +28,8 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import CitationKeys, GovernanceConfig  # noqa: E402
+import pins as P  # noqa: E402
+from pins import CONFIG_NAMES  # noqa: E402  (single definition; also used by templates.py as V.CONFIG_NAMES)
 
 ADR_ID_RE = re.compile(r"^[A-Z][A-Z0-9]*-ADR-\d{3,}$")
 ADR_ID_IN = re.compile(r"\b([A-Z][A-Z0-9]*-ADR-\d{3,})\b")
@@ -33,7 +37,6 @@ BARE_ADR_RE = re.compile(r"^ADR-\d{3,}$")          # un-prefixed id: inherits th
 BARE_ADR_IN = re.compile(r"\bADR-\d{3,}\b")         # un-prefixed id within a filename
 AMENDMENTS_RE = re.compile(r"(?im)^\s*##\s+amendments\s*$")
 STATUS_RE = re.compile(r"(?im)\bstatus\b\s*[:*\s]+\s*([A-Za-z]+)")
-CONFIG_NAMES = (".spec-arch-governance.yml", ".spec-arch-governance.yaml")
 
 
 @dataclass
@@ -184,16 +187,8 @@ def build_indexes(cfg: GovernanceConfig, repo_root: Path):
     spec_index: dict[str, set[str]] = {"": _spec_ids(repo_root, cfg.specs_dir)}
     for src in cfg.sources:
         sroot = _source_root(repo_root, src)
-        s_adr_dir, s_specs_dir, s_namespace = cfg.adr_dir, cfg.specs_dir, ""
-        for name in CONFIG_NAMES:
-            f = sroot / name
-            if f.is_file():
-                try:
-                    scfg = GovernanceConfig.model_validate(yaml.safe_load(f.read_text()) or {})
-                    s_adr_dir, s_specs_dir, s_namespace = scfg.adr_dir, scfg.specs_dir, scfg.namespace
-                except Exception:
-                    pass
-                break
+        # the peer's own layout, via the single shared peek (pins.peer_layout, R1)
+        s_adr_dir, s_specs_dir, s_namespace = P.peer_layout(sroot, cfg)
         # a source's bare ADR-NNN is qualified with the SOURCE's own namespace, so cross-repo
         # citations only resolve in the fully-qualified form.
         for a in scan_adrs(sroot, s_adr_dir, s_namespace):
@@ -279,6 +274,64 @@ def check_governance_adopted(repo_root, adr_dir, governance_adr) -> list[Issue]:
     return []
 
 
+def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_index, spec_index) -> list[Issue]:
+    """The sixth check (slice 006): pinned citations still match the cited artifact's
+    current content state. Strictly read-only — it NEVER writes pins (FR-011).
+
+    Severity ladder (D5): only a *determinate* mismatch on an *existing* pin is a
+    failure. Unpinned → nudge note (FR-006); orphaned pin → prunable note (FR-007);
+    cannot-evaluate → indeterminate note (FR-008). A citation already failing
+    `citations_resolve` stays silent here — the resolve failure owns its story (FR-009);
+    if that check is disabled, nobody owns it, so it degrades to an indeterminate note.
+    """
+    out: list[Issue] = []
+    try:
+        pins = P.load_pins(repo_root)
+    except P.PinLoadError as exc:
+        out.append(Issue("citations_fresh",
+                         f"pin file {P.PIN_FILE} could not be parsed ({exc}) — "
+                         f"treating all citations as unpinned for this run",
+                         P.PIN_FILE, severity="note"))
+        pins = {}
+    keys_seen: set[P.PinKey] = set()
+    for c in cits:
+        k = (c.source, c.relation, c.value)
+        if k in keys_seen:
+            continue  # duplicate slot entry — one verdict per pin key
+        keys_seen.add(k)
+        resolves = (c.value in adr_index) if c.relation == "cites" else _resolve_spec(c.value, spec_index)
+        if not resolves:
+            if not cfg.checks.citations_resolve:
+                out.append(Issue("citations_fresh",
+                                 f"{c.relation} {c.value!r}: freshness indeterminate — the citation does "
+                                 f"not resolve (and citations_resolve is disabled)",
+                                 c.source, severity="note"))
+            continue  # FR-009: the citations_resolve failure owns this citation's story
+        pin = pins.get(k)
+        if pin is None:
+            out.append(Issue("citations_fresh",
+                             f"{c.relation} {c.value!r} is unpinned — run `repin --apply` to start "
+                             f"freshness tracking", c.source, severity="note"))
+            continue
+        t = P.resolve_target(cfg, repo_root, c.relation, c.value, adr_index)
+        if t.status != "ok":
+            out.append(Issue("citations_fresh",
+                             f"{c.relation} {c.value!r}: freshness indeterminate — {t.reason}",
+                             c.source, severity="note"))
+        elif t.digest != pin.digest:
+            out.append(Issue("citations_fresh",
+                             f"{c.relation} {c.value!r} is STALE — {t.display} changed since it was "
+                             f"pinned (pinned {P.abbrev(pin.digest)}, current {P.abbrev(t.digest)}); "
+                             f"review the upstream change, then `repin`", c.source))
+    for k in sorted(pins):
+        if k not in keys_seen:
+            pin = pins[k]
+            out.append(Issue("citations_fresh",
+                             f"orphaned pin: {pin.relation} {pin.value!r} is no longer cited — "
+                             f"prunable via `repin`", pin.citing, severity="note"))
+    return out
+
+
 def coverage_report(cfg: GovernanceConfig, repo_root: Path) -> list[Issue]:
     """Advisory: feature specs whose `derived_from` AND `cites` slots are both empty/absent.
 
@@ -316,6 +369,7 @@ def validate(cfg: GovernanceConfig, repo_root: Path):
         "citations_current": lambda: check_citations_current(cits, adr_index),
         "adr_immutability": lambda: check_adr_immutability(this_adrs, repo_root),
         "governance_adopted": lambda: check_governance_adopted(repo_root, cfg.adr_dir, cfg.governance_adr),
+        "citations_fresh": lambda: check_citations_fresh(cfg, repo_root, cits, adr_index, spec_index),
     }
     issues: list[Issue] = []
     for name, fn in runners.items():

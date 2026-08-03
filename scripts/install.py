@@ -337,6 +337,11 @@ def main(argv=None) -> int:
         print("── validate ──")
         issues, stats = V.validate(cfg, repo_root)
         print(V.render_report(issues, stats, cfg))
+    # Freshness (slice 006, OQ-4): install NEVER writes pins — seeding them is the operator's
+    # explicit act (FR-011 keeps `repin --apply` the only writer). End with the exact command.
+    print("install: citation freshness — no pins were written (install never writes pins).")
+    print(f"         To start freshness tracking, run:  uv run python "
+          f"{Path(__file__).with_name('repin.py')} {repo_root} --apply")
     return 0
 
 
