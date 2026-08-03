@@ -15,6 +15,8 @@ The structured form of one determinate `citations_fresh` failure — the emitter
 | `current_digest` | `str` | `sha256:<64hex>` of the cited artifact now |
 
 **Identity** (OQ-A): the pin key `(citing, relation, value)` — same key as `.spec-arch-pins.yml`.
+**D5 refinement (round 5 P1)**: rendered content is deterministic PER LIFECYCLE — same fact,
+same lifecycle ⇒ same bytes (the marker embeds `lifecycle=N`).
 **Content state**: the `(pinned_digest, current_digest)` pair.
 **Invariant**: a fact exists ⟺ the engine emitted a `citations_fresh` failure-severity finding
 with it attached; the emitter never constructs facts itself.
@@ -37,6 +39,7 @@ One entry per mirrored fact. File: `version: v1`, records sorted by pin key (det
 | `pinned_digest` | `str` | last-emitted pinned digest |
 | `current_digest` | `str` | last-emitted current digest |
 | `status` | `str` | `open` \| `creating` \| `resolving` \| `dismissing` \| `resolved` \| `dismissed` |
+| `lifecycle` | `int` (>= 1, REQUIRED) | the key's issue-lifecycle ordinal (round 5 P1): 1 for the first issue, +1 per NEW issue (restale-after-resolved; deleted-and-recreated). Scopes the recovery marker; sourced from the sidecar, never the tracker |
 
 **States & transitions** (writer: the apply loop only):
 

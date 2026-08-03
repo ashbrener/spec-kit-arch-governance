@@ -132,6 +132,14 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   `skip … (freshness not evaluated — mirror preserved)` row. Facts that ARE present stay
   live — create/update/up-to-date are unaffected (a determinate fact is a fact). Benign notes
   (unpinned nudges, orphaned pins) impair nothing.
+  **Harvest layer (round 5 P2-2)**: a citing file whose front-matter BLOCK exists but does not
+  parse is a PARSE FAILURE of the citation source — "cannot evaluate", never "citations
+  absent". The scan reports such files through an additive side-channel (harvested citations
+  and every other check's findings stay byte-identical), and `citations_fresh` emits one
+  structurally-flagged indeterminate note per file — so `freshness_evaluated` goes False and
+  every would-be resolve becomes the explicit preserve-skip. Blast radius is deliberately
+  WHOLE-RUN, consistent with this decision's per-run-coarse granularity. A file with no
+  front-matter block at all is NOT malformed: its citations are honestly absent.
 - **Rationale**: "no facts" has two meanings — CONFIRMED resolution vs NOT EVALUATED — and only
   the first may close a live issue. Without the signal, disabling the check (or a malformed pin
   file collapsing every pin to unpinned) made the planner resolve every open mirror — often
@@ -213,6 +221,21 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   runtime-checkable and a test requires every protocol member to exist as a real
   implementation on BOTH transports, so a protocol method the production class lacks fails
   the suite the moment the protocol grows.
+- **Round 5 P1 — the marker is LIFECYCLE-scoped and adoption is VERIFIED**: a marker keyed on
+  namespace+pin-key alone let an interrupted REPLACEMENT create rendezvous with the previous
+  lifecycle's closed issue — adopted, it read as human-dismissed and the replacement was never
+  created. The `MirrorRecord` carries a required `lifecycle` ordinal (1, +1 per new issue for
+  the key — restale-after-resolved and deleted-and-recreated both bump it), the marker embeds
+  it (D5 refinement: determinism per (fact, lifecycle)), and the ordinal comes from the
+  SIDECAR's retained predecessor record, never tracker state. Independently, `find_by_marker`
+  adoption verifies the found issue's STATE against the intent: adopting-for-create expects
+  open — a closed hit with the current lifecycle's marker is handled explicitly (still-stale →
+  the full OQ-C respect-and-note path, marker-checked; fact-resolved → record-only
+  `resolved`), never a silent adopt into `open`.
+- **Round 5 P2-1 — the comment recovery read paginates fully**: GitHub returns 30 comments per
+  page by default; an unpaginated read hid a just-posted marker behind page one and the retry
+  re-posted the note. `has_comment_marker` now reads `--paginate --slurp` with `per_page=100`
+  and flattens the page arrays — still one bounded, issue-scoped read.
 
 ## R11 — Resolution-detail classification via the current citation set (review round 3, P2-3)
 

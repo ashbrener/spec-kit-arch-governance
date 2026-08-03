@@ -207,7 +207,7 @@ def _rec(**kw):
     base = dict(citing="specs/001-derived/spec.md", relation="derived_from",
                 value="docs:005-fund-model", repo="acme/widgets", issue=42,
                 pinned_digest="sha256:" + "a" * 64, current_digest="sha256:" + "b" * 64,
-                status="open")
+                status="open", lifecycle=1)
     base.update(kw)
     return ISS.MirrorRecord(**base)
 
@@ -357,8 +357,9 @@ def test_render_title_and_body_are_deterministic_functions_of_the_fact(tmp_path)
                    P.abbrev(fact.current_digest), fact.pinned_date, "repin"):
         assert needle in body1
     marker = ("<!-- API-governance issues v1 "
-              "key=specs/001-derived/spec.md|derived_from|docs:005-fund-model -->")
-    assert marker in body1                                          # forensics marker (R6)
+              "key=specs/001-derived/spec.md|derived_from|docs:005-fund-model "
+              "lifecycle=1 -->")
+    assert marker in body1                    # forensics marker, lifecycle-scoped (R6/R10)
     import datetime
     assert str(datetime.date.today()) == fact.pinned_date or True   # no emission timestamps:
     assert "T" not in body1.split("repin")[0] or True               # (fields only, asserted above)
@@ -859,6 +860,7 @@ def test_record_failure_after_create_recovers_by_marker_no_duplicate(tmp_path, m
     assert len(t2.of("find_by_marker")) == 1               # one bounded recovery read
     rec = _mirrors(build)[k]
     assert rec.status == "open" and rec.issue == 101
+    assert rec.lifecycle == 1                              # same lifecycle adopts (round 5)
     assert len(report) == 1 and "adopted" in report[0] and "#101" in report[0]
 
 
@@ -979,8 +981,10 @@ def test_gh_transport_recovery_read_commands():
     assert g._argv_find_by_marker("o/r", "<!-- m -->") == [
         "gh", "api", "-X", "GET", "search/issues",
         "-f", 'q=repo:o/r in:body "<!-- m -->"']
+    # round 5 P2-1: the comments read is FULLY paginated — a marker beyond the
+    # default first page (30 comments) must still be seen, or a retry re-posts
     assert g._argv_list_comments("o/r", 7) == [
-        "gh", "api", "repos/o/r/issues/7/comments"]
+        "gh", "api", "--paginate", "--slurp", "repos/o/r/issues/7/comments?per_page=100"]
 
 
 # ═══ Review round 4 — P1: the production transport implements the FULL protocol ═══
@@ -1037,18 +1041,36 @@ def test_gh_transport_has_comment_marker_parses_comment_list(monkeypatch):
 
     def fake_run(argv):
         ran.append(argv)
-        return f'[{{"body": "first"}}, {{"body": "note {marker}"}}]'
+        # --slurp wraps pages into an array of page-arrays
+        return f'[[{{"body": "first"}}, {{"body": "note {marker}"}}]]'
 
     monkeypatch.setattr(g, "_run", fake_run)
     assert g.has_comment_marker("o/r", 7, marker) is True
     assert ran == [g._argv_list_comments("o/r", 7)]
-    monkeypatch.setattr(g, "_run", lambda argv: '[{"body": "unrelated"}]')
+    monkeypatch.setattr(g, "_run", lambda argv: '[[{"body": "unrelated"}]]')
     assert g.has_comment_marker("o/r", 7, marker) is False
     monkeypatch.setattr(g, "_run", lambda argv: '[]')
     assert g.has_comment_marker("o/r", 7, marker) is False
+    # a flat single-page list (older gh without --slurp) is tolerated too
+    monkeypatch.setattr(g, "_run", lambda argv: f'[{{"body": "note {marker}"}}]')
+    assert g.has_comment_marker("o/r", 7, marker) is True
     monkeypatch.setattr(g, "_run", lambda argv: '{"not": "a list"}')
     with pytest.raises(ISS.EmissionError):
         g.has_comment_marker("o/r", 7, marker)             # shape violation is typed
+
+
+def test_gh_transport_comment_marker_seen_beyond_first_page(monkeypatch):
+    """Round 5 P2-1: a marker on page 2+ (≥30 comments) must still be found —
+    an unpaginated read would hide it and the retry would re-post the note."""
+    g = ISS.GhTransport()
+    marker = "<!-- API-governance issues v1 key=a|cites|X lifecycle=1 -->"
+    page1 = ", ".join(f'{{"body": "comment {i}"}}' for i in range(30))
+    pages = f'[[{page1}], [{{"body": "the note {marker}"}}]]'
+    monkeypatch.setattr(g, "_run", lambda argv: pages)
+    assert g.has_comment_marker("o/r", 7, marker) is True
+    pages_without = f'[[{page1}], [{{"body": "unrelated tail"}}]]'
+    monkeypatch.setattr(g, "_run", lambda argv: pages_without)
+    assert g.has_comment_marker("o/r", 7, marker) is False
 
 
 def test_gh_transport_recovery_reads_map_failures_to_emission_error(monkeypatch):
@@ -1068,6 +1090,180 @@ def test_gh_transport_recovery_reads_map_failures_to_emission_error(monkeypatch)
     with pytest.raises(ISS.EmissionError) as e2:
         g.has_comment_marker("o/r", 7, "<!-- m -->")
     assert "rate limit" in str(e2.value)
+
+
+# ═══ Review round 5 — P1: lifecycle-scoped marker + verified adoption (R10) ═══
+
+def test_marker_is_lifecycle_scoped():
+    k = ("specs/a/spec.md", "derived_from", "docs:x")
+    m1 = ISS._marker("API", k, 1)
+    assert m1 == ("<!-- API-governance issues v1 "
+                  "key=specs/a/spec.md|derived_from|docs:x lifecycle=1 -->")
+    m2 = ISS._marker("API", k, 2)
+    assert m2 != m1 and "lifecycle=2" in m2
+    # D5 refinement: determinism holds PER LIFECYCLE — same fact, same lifecycle,
+    # same bytes
+    assert ISS._marker("API", k, 1) == m1
+
+
+def test_restale_interrupted_create_never_adopts_previous_lifecycles_issue(tmp_path):
+    src, build, cfg, root, facts, k = _one_stale_enabled(tmp_path)
+    t1 = FakeTransport()
+    _apply(build, cfg, root, facts, t1)                # lifecycle 1 → issue #101
+    assert R.main([str(build), "--apply"]) == 0        # the fact resolves…
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t2 = FakeTransport()
+    t2.states[101] = "open"
+    _apply(build, cfg, root, ISS.staleness_facts(issues), t2)     # …and #101 is closed
+    rec = _mirrors(build)[k]
+    assert rec.status == "resolved" and rec.lifecycle == 1
+    # the SAME key goes stale again → lifecycle 2, and its create is interrupted
+    (src / "specs" / "005-fund-model" / "spec.md").write_text(
+        UPSTREAM_SPEC.replace("v1", "v3"))
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts3 = ISS.staleness_facts(issues)
+    t3 = FakeTransport()
+    t3.fail["create"] = ISS.EmissionError("boom")
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts3, t3)
+    rec = ISS.load_mirrors(build)[k]
+    assert rec.status == "creating" and rec.lifecycle == 2 and rec.issue is None
+    # retry: the tracker still holds lifecycle 1's CLOSED issue — it must NOT be
+    # adopted (that would read as human-dismissed and the replacement never created)
+    t4 = FakeTransport()
+    t4.seeded_issue_bodies[101] = t1.created[101]      # carries lifecycle=1 marker
+    t4.states[101] = "closed"
+    t4.next_number = 400
+    rows, report, _ = _apply(build, cfg, root, facts3, t4)
+    assert len(t4.of("create")) == 1                   # a NEW issue for lifecycle 2
+    rec = _mirrors(build)[k]
+    assert rec.issue == 400 and rec.status == "open" and rec.lifecycle == 2
+    assert not any("adopted" in ln for ln in report)
+
+
+def test_adoption_verifies_state_closed_hit_is_operator_closure(tmp_path, monkeypatch):
+    src, build, cfg, root, facts, k = _one_stale_enabled(tmp_path)
+    real = ISS.write_mirrors
+    n = {"count": 0}
+
+    def flaky(root_, records):                         # fail ONLY the post-create write
+        n["count"] += 1
+        if n["count"] == 2:
+            raise OSError("disk full")
+        return real(root_, records)
+
+    monkeypatch.setattr(ISS, "write_mirrors", flaky)
+    t = FakeTransport()
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)             # created remotely, unrecorded
+    # a human closes the freshly created issue BEFORE the retry
+    t2 = FakeTransport()
+    t2.seeded_issue_bodies[101] = t.created[101]
+    t2.states[101] = "closed"
+    rows, report, _ = _apply(build, cfg, root, facts, t2)
+    assert t2.of("create") == []                       # adopted, never duplicated
+    assert len(t2.of("comment")) == 1                  # …but NOT silently open:
+    rec = _mirrors(build)[k]                           # full OQ-C treatment
+    assert rec.issue == 101 and rec.status == "dismissed"
+    assert any("dismissed" in ln for ln in report)
+    # the run after that stays quiet (dismissed is respected)
+    t3 = FakeTransport()
+    _, report3, mutated3 = _apply(build, cfg, root, facts, t3)
+    assert t3.calls == [] and not mutated3
+
+
+def test_resolve_recovery_adoption_verifies_state(tmp_path, monkeypatch):
+    src, build, cfg, root, facts, k = _one_stale_enabled(tmp_path)
+    real = ISS.write_mirrors
+    n = {"count": 0}
+
+    def flaky(root_, records):
+        n["count"] += 1
+        if n["count"] == 2:
+            raise OSError("disk full")
+        return real(root_, records)
+
+    monkeypatch.setattr(ISS, "write_mirrors", flaky)
+    t = FakeTransport()
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)             # created remotely, unrecorded
+    assert R.main([str(build), "--apply"]) == 0        # fact resolves meanwhile
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t2 = FakeTransport()
+    t2.seeded_issue_bodies[101] = t.created[101]
+    t2.states[101] = "closed"                          # and the issue is closed too
+    rows, report, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t2)
+    assert t2.of("create") == [] and t2.of("comment") == [] and t2.of("close") == []
+    rec = _mirrors(build)[k]
+    assert rec.issue == 101 and rec.status == "resolved"   # record-only, honest
+
+
+def test_mirror_file_requires_a_valid_lifecycle(tmp_path):
+    ISS.write_mirrors(tmp_path, [_rec(lifecycle=3)])
+    assert ISS.load_mirrors(tmp_path)[_rec().key].lifecycle == 3   # round-trips
+    for damage in (lambda m: m.pop("lifecycle"),               # missing (unreleased: required)
+                   lambda m: m.__setitem__("lifecycle", 0),    # below 1
+                   lambda m: m.__setitem__("lifecycle", "x")):  # wrong type
+        doc = yaml.safe_load((tmp_path / ISS.MIRROR_FILE).read_text())
+        damage(doc["mirrors"][0])
+        (tmp_path / ISS.MIRROR_FILE).write_text(yaml.safe_dump(doc))
+        with pytest.raises(ISS.IssuesFileError):
+            ISS.load_mirrors(tmp_path)
+        ISS.write_mirrors(tmp_path, [_rec(lifecycle=3)])       # restore for the next case
+
+
+# ═══ Review round 5 — P2-2: malformed front matter is NOT-EVALUATED, never absent ═══
+
+def test_malformed_front_matter_preserves_open_mirrors(tmp_path, capsys):
+    src, build, k = _mirrored_stale(tmp_path)          # open mirror #101, still stale
+    spec = build / "specs" / "001-derived" / "spec.md"
+    good = spec.read_text()
+    spec.write_text("---\nderived_from: [unclosed\n---\n# Derived spec\n")
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    assert ISS.staleness_facts(issues) == []           # no fact harvested…
+    assert not ISS.freshness_evaluated(cfg, issues)    # …but NOT "citations absent"
+    flagged = [i for i in issues if i.check == "citations_fresh" and i.indeterminate]
+    assert any("front matter" in i.detail for i in flagged)
+    before = (build / ISS.MIRROR_FILE).read_bytes()
+    t = FakeTransport()
+    rows, report, mutated = _apply(build, cfg, root, [], t)
+    by_key = {r.key: r for r in rows}
+    assert by_key[k].disposition == "skip"             # preserved, said explicitly
+    assert "freshness not evaluated" in by_key[k].detail
+    assert t.calls == [] and not mutated               # never closed as "citation removed"
+    assert (build / ISS.MIRROR_FILE).read_bytes() == before
+    # restoring the front matter resumes normal evaluation
+    spec.write_text(good)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    assert ISS.freshness_evaluated(cfg, issues)
+    assert len(ISS.staleness_facts(issues)) == 1       # the fact is back
+
+
+def test_malformed_plan_front_matter_also_flags_not_evaluated(tmp_path):
+    src, build = _domain(tmp_path)
+    _pin(build)
+    (build / "specs" / "001-derived" / "plan.md").write_text(
+        "---\ncites: {broken\n---\n# Plan\n")
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    assert not ISS.freshness_evaluated(cfg, issues)
+    flagged = [i for i in issues if i.check == "citations_fresh" and i.indeterminate]
+    assert any("plan.md" in i.where for i in flagged)
+
+
+def test_files_without_front_matter_are_not_flagged(tmp_path):
+    src, build = _domain(tmp_path)
+    _pin(build)
+    (build / "specs" / "002-plain").mkdir(parents=True)
+    (build / "specs" / "002-plain" / "spec.md").write_text("# No front matter at all\n")
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    assert ISS.freshness_evaluated(cfg, issues)        # absence is honest, not malformed
 
 
 # ═══ Review round 3 — P2-3: resolution detail via the current citation set ═══
@@ -1117,7 +1313,7 @@ def test_title_is_capped_at_256_chars_deterministically():
     assert ISS.render_title(long_fact, "API") == t1        # identical bytes (D5)
     body = ISS.render_body(long_fact, "API")
     assert long_fact.value in body                         # full identity intact in the body
-    assert ISS._marker("API", long_fact.key) in body
+    assert ISS._marker("API", long_fact.key, 1) in body
     assert len(body) < 65536                               # GitHub body limit — ample headroom
     normal = ISS.StalenessFact(
         relation="cites", value="CORE-ADR-001", citing="specs/001-derived/plan.md",

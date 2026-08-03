@@ -138,6 +138,13 @@ class MirrorRecord:
     pinned_digest: str     # last-emitted pinned digest
     current_digest: str    # last-emitted current digest
     status: str            # open | creating | resolving | dismissing | resolved | dismissed
+    # Lifecycle ordinal (round 5 P1): 1 for a key's first issue, incremented every
+    # time the key gets a NEW issue (restale-after-resolved; deleted-and-recreated).
+    # Scopes the recovery marker so an interrupted replacement create can never
+    # adopt a PREVIOUS lifecycle's closed issue. Sourced from the SIDECAR (the
+    # retained predecessor record), never from tracker state. Required — no
+    # default: every writer states the lifecycle it means.
+    lifecycle: int
 
     @property
     def key(self) -> P.PinKey:
@@ -172,6 +179,12 @@ def _validate_record(r: MirrorRecord) -> None:
     elif not isinstance(r.issue, int) or isinstance(r.issue, bool):
         raise IssuesFileError(f"mirror for {r.value!r} ({r.status}) must carry an integer "
                               f"issue number, got {type(r.issue).__name__}")
+    if not isinstance(r.lifecycle, int) or isinstance(r.lifecycle, bool) or r.lifecycle < 1:
+        # REQUIRED (round 5 P1): the branch is unreleased, so no lenient default —
+        # a missing/invalid lifecycle is corruption, and defaulting it could scope a
+        # recovery marker to the wrong lifecycle (the exact mis-adoption bug).
+        raise IssuesFileError(f"mirror for {r.value!r} has a missing/invalid 'lifecycle' "
+                              f"{r.lifecycle!r} (want an integer >= 1)")
     for name in ("pinned_digest", "current_digest"):
         if not _DIGEST_RE.match(getattr(r, name)):
             raise IssuesFileError(f"mirror for {r.value!r} has an invalid {name} "
@@ -213,7 +226,7 @@ def load_mirrors(repo_root) -> dict[P.PinKey, MirrorRecord]:
                              value=_scalar(e, "value"), repo=_scalar(e, "repo"),
                              issue=number, pinned_digest=_scalar(e, "pinned_digest"),
                              current_digest=_scalar(e, "current_digest"),
-                             status=_scalar(e, "status"))
+                             status=_scalar(e, "status"), lifecycle=e.get("lifecycle"))
             _validate_record(r)
             if r.key in out:
                 raise IssuesFileError(f"duplicate mirror identity {r.key} — the file is "
@@ -233,7 +246,8 @@ def mirrors_to_yaml(records) -> str:
         "version": "v1",
         "mirrors": [
             {"citing": r.citing, "relation": r.relation, "value": r.value,
-             "repo": r.repo, "issue": r.issue, "pinned_digest": r.pinned_digest,
+             "repo": r.repo, "issue": r.issue, "lifecycle": r.lifecycle,
+             "pinned_digest": r.pinned_digest,
              "current_digest": r.current_digest, "status": r.status}
             for r in sorted(records, key=lambda r: r.key)
         ],
@@ -260,10 +274,14 @@ def write_mirrors(repo_root, records) -> None:
 
 # ──────────────────────────── deterministic content (D5/R6) ────────────────────────────
 
-def _marker(namespace: str, key: P.PinKey) -> str:
-    """Human-forensics marker in emitter-owned bodies/comments. The SIDECAR, not the
-    marker, is the source of truth for dedup (R6)."""
-    return f"<!-- {namespace}-governance issues v1 key={key[0]}|{key[1]}|{key[2]} -->"
+def _marker(namespace: str, key: P.PinKey, lifecycle: int) -> str:
+    """Human-forensics + recovery marker in emitter-owned bodies/comments. The
+    SIDECAR, not the marker, is the source of truth for dedup (R6); the marker is
+    the R10 recovery rendezvous, and is LIFECYCLE-SCOPED (round 5 P1) so an
+    interrupted replacement create can never rendezvous with a previous
+    lifecycle's closed issue. D5 refinement: same fact, same lifecycle ⇒ same bytes."""
+    return (f"<!-- {namespace}-governance issues v1 "
+            f"key={key[0]}|{key[1]}|{key[2]} lifecycle={lifecycle} -->")
 
 
 # GitHub caps issue titles at 256 characters (bodies at 65536 — our bodies are a few
@@ -282,9 +300,10 @@ def render_title(fact: StalenessFact, namespace: str) -> str:
     return title
 
 
-def render_body(fact: StalenessFact, namespace: str) -> str:
-    """The issue body — a deterministic function of the fact alone: no emission
-    timestamps, no run ordering, nothing environmental (D5). Same fact ⇒ same bytes,
+def render_body(fact: StalenessFact, namespace: str, lifecycle: int = 1) -> str:
+    """The issue body — a deterministic function of (fact, lifecycle): no emission
+    timestamps, no run ordering, nothing environmental (D5, refined by round 5 P1:
+    determinism holds PER LIFECYCLE). Same fact + same lifecycle ⇒ same bytes,
     so updates render as meaningful diffs and tests assert bytes."""
     return (
         f"A pinned citation is **stale** — the cited artifact's content moved since the "
@@ -310,7 +329,7 @@ def render_body(fact: StalenessFact, namespace: str) -> str:
         f"state moves again; comments are yours. Closing this issue by hand is respected "
         f"(noted once, never re-opened).\n"
         f"\n"
-        f"{_marker(namespace, fact.key)}\n"
+        f"{_marker(namespace, fact.key, lifecycle)}\n"
     )
 
 
@@ -320,11 +339,11 @@ def render_resolution_comment(record: MirrorRecord, detail: str, namespace: str)
         f"Resolved: `{record.relation} '{record.value}'` in `{record.citing}` "
         f"({detail or 'no longer stale'}). Closing this mirror issue.\n"
         f"\n"
-        f"{_marker(namespace, record.key)}\n"
+        f"{_marker(namespace, record.key, record.lifecycle)}\n"
     )
 
 
-def render_dismissal_comment(fact: StalenessFact, namespace: str) -> str:
+def render_dismissal_comment(fact: StalenessFact, namespace: str, lifecycle: int = 1) -> str:
     """The single continued-staleness note on a human-closed-but-stale issue (OQ-C)."""
     return (
         f"This issue was closed while `{fact.relation} '{fact.value}'` in `{fact.citing}` "
@@ -332,7 +351,7 @@ def render_dismissal_comment(fact: StalenessFact, namespace: str) -> str:
         f"`{P.abbrev(fact.current_digest)}`). Respecting the closure — recorded as "
         f"dismissed; the emitter will not comment again and will never re-open this issue.\n"
         f"\n"
-        f"{_marker(namespace, fact.key)}\n"
+        f"{_marker(namespace, fact.key, lifecycle)}\n"
     )
 
 
@@ -357,7 +376,10 @@ class PlanRow:
 
     def render(self) -> str:
         loc = f"{self.relation} '{self.value}' in {self.citing}"
-        has_number = self.record is not None and self.record.issue is not None
+        # create rows never show a number: any record they carry is the PREDECESSOR
+        # lifecycle's (or a numberless intent), not the issue being created
+        has_number = (self.record is not None and self.record.issue is not None
+                      and self.disposition != "create")
         ref = f"  #{self.record.issue}" if has_number else ""
         det = f"  ({self.detail})" if self.detail else ""
         return f"  {self.disposition:<10}  {loc}{ref}{det}"
@@ -411,8 +433,10 @@ def issues_plan(facts, mirrors, pins=None, evaluated=True, cited_keys=None) -> l
             detail = f"pinned {P.abbrev(f.pinned_digest)} → current {P.abbrev(f.current_digest)}"
             if rec is not None:
                 detail += "; stale again after resolution — new lifecycle"
+            # the resolved PREDECESSOR record rides along (round 5 P1): its
+            # lifecycle ordinal seeds the new issue's lifecycle (+1)
             rows.append(PlanRow("create", f.citing, f.relation, f.value, fact=f,
-                                record=None, detail=detail))
+                                record=rec, detail=detail))
         elif rec.status == "creating":
             # R10: a prior run's create-intent — an issue MAY exist with no recorded
             # number. Apply reconciles with ONE bounded marker probe: found → adopt,
@@ -570,7 +594,11 @@ class GhTransport:
                 "-f", f'q=repo:{repo} in:body "{marker}"']
 
     def _argv_list_comments(self, repo: str, number: int) -> list[str]:
-        return [self.gh, "api", f"repos/{repo}/issues/{number}/comments"]
+        # FULLY paginated (round 5 P2-1): the default page size (30) would hide a
+        # marker beyond page one and the retry would re-post the note. --slurp
+        # wraps the pages into one JSON array-of-arrays.
+        return [self.gh, "api", "--paginate", "--slurp",
+                f"repos/{repo}/issues/{number}/comments?per_page=100"]
 
     # execution
 
@@ -644,8 +672,14 @@ class GhTransport:
         if not isinstance(data, list):
             raise EmissionError(f"`gh api` comments returned {type(data).__name__}, "
                                 f"expected a list")
+        # --slurp yields an array of PAGE arrays; flatten. A flat comment list
+        # (older gh without --slurp) is tolerated for robustness.
+        if all(isinstance(page, list) for page in data):
+            comments = [c for page in data for c in page]
+        else:
+            comments = data
         return any(isinstance(c, dict) and marker in str(c.get("body") or "")
-                   for c in data)
+                   for c in comments)
 
 
 # ──────────────────────────── the apply loop (FR-009/FR-011) ────────────────────────────
@@ -688,19 +722,23 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
         del mirrors[key]
         _persist()
 
-    def create_issue(row: PlanRow, f: StalenessFact, note: str) -> None:
+    def create_issue(row: PlanRow, f: StalenessFact, note: str, lifecycle: int) -> None:
         # R10 two-phase intent: persist `creating` BEFORE the remote effect — an
         # intent-write failure is a clean abort (nothing remote has happened), and
         # an intent without a number tells the NEXT run "a create may exist; probe
-        # by marker before creating again".
+        # by marker before creating again". The lifecycle ordinal (round 5 P1)
+        # scopes that probe to THIS issue, never a predecessor's.
         record(MirrorRecord(citing=f.citing, relation=f.relation, value=f.value,
                             repo=target, issue=None, pinned_digest=f.pinned_digest,
-                            current_digest=f.current_digest, status="creating"))
-        number = transport.create(target, render_title(f, ns), render_body(f, ns),
+                            current_digest=f.current_digest, status="creating",
+                            lifecycle=lifecycle))
+        number = transport.create(target, render_title(f, ns),
+                                  render_body(f, ns, lifecycle),
                                   list(cfg.issues.labels))
         record(MirrorRecord(citing=f.citing, relation=f.relation, value=f.value,
                             repo=target, issue=number, pinned_digest=f.pinned_digest,
-                            current_digest=f.current_digest, status="open"))
+                            current_digest=f.current_digest, status="open",
+                            lifecycle=lifecycle))
         report.append(_audit("created", row, number, note))
 
     def dismiss(row: PlanRow, rec: MirrorRecord, f: StalenessFact) -> None:
@@ -709,20 +747,24 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
         # `dismissing` intent is persisted BEFORE the note, so an interrupted
         # confirm write can never cause a double post (retry marker-checks).
         record(replace(rec, status="dismissing"))
-        transport.comment(rec.repo, rec.issue, render_dismissal_comment(f, ns))
+        transport.comment(rec.repo, rec.issue,
+                          render_dismissal_comment(f, ns, rec.lifecycle))
         record(replace(rec, status="dismissed"))
         report.append(_audit("dismissed", row, rec.issue,
                              "closed by operator while still stale — noted, "
                              "will not re-open"))
 
-    def finish_dismissal(row: PlanRow, rec: MirrorRecord, f: StalenessFact) -> None:
+    def finish_dismissal(row: PlanRow, rec: MirrorRecord, f: StalenessFact,
+                         note: str = "completed pending dismissal note — "
+                                     "will not re-open") -> None:
         # R10 recovery: the note may or may not have posted — ONE bounded,
         # issue-scoped marker check decides; never a second note.
-        if not transport.has_comment_marker(rec.repo, rec.issue, _marker(ns, row.key)):
-            transport.comment(rec.repo, rec.issue, render_dismissal_comment(f, ns))
+        if not transport.has_comment_marker(rec.repo, rec.issue,
+                                            _marker(ns, row.key, rec.lifecycle)):
+            transport.comment(rec.repo, rec.issue,
+                              render_dismissal_comment(f, ns, rec.lifecycle))
         record(replace(rec, status="dismissed"))
-        report.append(_audit("dismissed", row, rec.issue,
-                             "completed pending dismissal note — will not re-open"))
+        report.append(_audit("dismissed", row, rec.issue, note))
 
     for row in rows:
         if row.disposition == "skip":
@@ -744,7 +786,7 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                 state = transport.get_state(rec.repo, rec.issue)
             except IssueNotFound:
                 create_issue(row, f, f"recorded issue #{rec.issue} was deleted "
-                                     f"repo-side — new lifecycle")
+                                     f"repo-side — new lifecycle", rec.lifecycle + 1)
                 mutated = True
                 continue
             if state == "closed":
@@ -756,17 +798,42 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
             assert f is not None
             if rec is not None and rec.status == "creating":
                 # R10 recovery: a create may have happened — ONE bounded marker
-                # probe; found → adopt the number, never a duplicate issue.
-                found = transport.find_by_marker(rec.repo, _marker(ns, row.key))
+                # probe, LIFECYCLE-scoped (round 5 P1: a predecessor lifecycle's
+                # closed issue can never match). Adoption VERIFIES the found
+                # issue's state against the intent being recovered — never a
+                # silent adopt into `open`.
+                found = transport.find_by_marker(rec.repo,
+                                                 _marker(ns, row.key, rec.lifecycle))
                 if found is not None:
-                    record(replace(rec, issue=found, status="open"))
-                    report.append(_audit("adopted", row, found,
-                                         "interrupted create recovered — issue "
-                                         "found by marker"))
-                    mutated = True
-                    continue
-                # probe found nothing → the create never happened; fall through
-            create_issue(row, f, row.detail)
+                    try:
+                        state = transport.get_state(rec.repo, found)
+                    except IssueNotFound:
+                        state = None            # vanished between search and read
+                    if state == "open":
+                        record(replace(rec, issue=found, status="open"))
+                        report.append(_audit("adopted", row, found,
+                                             "interrupted create recovered — issue "
+                                             "found by marker"))
+                        mutated = True
+                        continue
+                    if state == "closed":
+                        # THIS lifecycle's issue exists but was closed while the
+                        # fact is stale: operator closure — adopt, then the full
+                        # OQ-C respect-and-note path (marker-checked: one note).
+                        adopted = replace(rec, issue=found, status="dismissing")
+                        record(adopted)
+                        finish_dismissal(row, adopted, f,
+                                         note="interrupted create found closed — "
+                                              "operator closure respected, noted once")
+                        mutated = True
+                        continue
+                    # state None → deleted again: fall through to a fresh create
+                create_issue(row, f, row.detail, rec.lifecycle)
+                mutated = True
+                continue
+            # a resolved PREDECESSOR record seeds the next lifecycle ordinal
+            lifecycle = rec.lifecycle + 1 if rec is not None else 1
+            create_issue(row, f, row.detail, lifecycle)
             mutated = True
         elif row.disposition == "update":
             f, rec = row.fact, row.record
@@ -776,13 +843,14 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
             except IssueNotFound:
                 # deleted repo-side + still stale → a fresh issue (new lifecycle)
                 create_issue(row, f, f"recorded issue #{rec.issue} was deleted "
-                                     f"repo-side — new lifecycle")
+                                     f"repo-side — new lifecycle", rec.lifecycle + 1)
                 mutated = True
                 continue
             if state == "closed":
                 dismiss(row, rec, f)
             else:
-                transport.update_body(rec.repo, rec.issue, render_body(f, ns))
+                transport.update_body(rec.repo, rec.issue,
+                                      render_body(f, ns, rec.lifecycle))
                 record(replace(rec, pinned_digest=f.pinned_digest,
                                current_digest=f.current_digest))
                 report.append(_audit("updated", row, rec.issue, row.detail))
@@ -791,20 +859,39 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
             rec = row.record
             assert rec is not None
             if rec.status == "creating":
-                # R10 recovery, fact no longer present: probe by marker — found →
-                # adopt (a normal lifecycle resolves it next run); not found → the
-                # create never happened, clear the intent (no ghost record).
-                found = transport.find_by_marker(rec.repo, _marker(ns, row.key))
+                # R10 recovery, fact no longer present: probe by the LIFECYCLE-scoped
+                # marker, then VERIFY the found issue's state (round 5 P1) — found
+                # open → adopt (a normal lifecycle resolves it next run); found
+                # closed → the resolution is already complete: record-only; not
+                # found / deleted → the create never happened, clear the intent.
+                found = transport.find_by_marker(rec.repo,
+                                                 _marker(ns, row.key, rec.lifecycle))
                 if found is None:
                     erase(row.key)
                     report.append(_audit("recorded", row, None,
                                          "interrupted create never happened — "
                                          "intent cleared"))
                 else:
-                    record(replace(rec, issue=found, status="open"))
-                    report.append(_audit("adopted", row, found,
-                                         "interrupted create recovered — issue found "
-                                         "by marker; lifecycle continues next run"))
+                    try:
+                        state = transport.get_state(rec.repo, found)
+                    except IssueNotFound:
+                        state = None            # vanished between search and read
+                    if state == "open":
+                        record(replace(rec, issue=found, status="open"))
+                        report.append(_audit("adopted", row, found,
+                                             "interrupted create recovered — issue "
+                                             "found by marker; lifecycle continues "
+                                             "next run"))
+                    elif state == "closed":
+                        record(replace(rec, issue=found, status="resolved"))
+                        report.append(_audit("recorded", row, found,
+                                             "adopted interrupted create found closed; "
+                                             "resolution recorded"))
+                    else:
+                        erase(row.key)
+                        report.append(_audit("recorded", row, None,
+                                             "interrupted create was deleted "
+                                             "repo-side — intent cleared"))
                 mutated = True
                 continue
             if rec.status == "dismissing":
@@ -846,7 +933,7 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                     transport.comment(rec.repo, rec.issue,
                                       render_resolution_comment(rec, row.detail, ns))
                 elif not transport.has_comment_marker(rec.repo, rec.issue,
-                                                      _marker(ns, row.key)):
+                                                      _marker(ns, row.key, rec.lifecycle)):
                     transport.comment(rec.repo, rec.issue,
                                       render_resolution_comment(rec, row.detail, ns))
                 transport.close(rec.repo, rec.issue)

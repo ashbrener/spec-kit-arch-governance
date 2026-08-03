@@ -14,6 +14,13 @@ mirrors:
     value: ARCH-ADR-003
     repo: acme/widgets
     issue: 42          # integer; null ONLY while status is `creating` (R10 intent)
+    lifecycle: 1        # REQUIRED integer >= 1 (round 5 P1): 1 for the key's first issue,
+                        # +1 whenever the key gets a NEW issue (restale-after-resolved,
+                        # deleted-and-recreated). Scopes the recovery marker so an
+                        # interrupted replacement create can never adopt a previous
+                        # lifecycle's closed issue. No lenient default — the branch is
+                        # unreleased, and defaulting could scope recovery to the wrong
+                        # lifecycle (the exact mis-adoption bug).
     pinned_digest: sha256:<64hex>
     current_digest: sha256:<64hex>
     status: open        # open | creating | resolving | dismissing | resolved | dismissed
@@ -25,6 +32,12 @@ mirrors:
   citation slot. One record per key.
 - **Ordering**: records sorted by key; serialization is deterministic — an idempotent re-run
   rewrites byte-identical content.
+- **Lifecycle** (round 5 P1): the ordinal is sourced from the SIDECAR (the retained
+  predecessor record), never from tracker state; the emitter's body/comment marker embeds it
+  (`… lifecycle=N -->`), and recovery adoption additionally VERIFIES the found issue's state
+  against the intent being recovered — a closed hit is handled explicitly (operator-closure
+  respect-and-note for a still-stale fact; record-only resolution for a resolved one), never
+  a silent adopt into `open`.
 - **Single writer**: only the apply loop writes this file, atomically (tmp + `os.replace`),
   after EACH successful emission — partial apply leaves exactly the succeeded rows recorded.
 - **Load**: absent → empty mirror set (fresh adoption). Present-but-broken (unparseable YAML,

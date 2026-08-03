@@ -102,7 +102,7 @@ The tracker is unreachable, the operator's credential is missing, or the API rat
 - A very long namespace/value/citing path would push the title past GitHub's 256-character
   limit: the title is hard-capped deterministically (fixed ellipsis); the full identity always
   lives in the body fields and the marker.
-- Freshness was NOT determinately evaluated this run (the `citations_fresh` check is disabled, the pin file is malformed, an evaluation is indeterminate, or a citation fails resolution): the absence of a fact is “not evaluated”, never “confirmed resolved” — no mirror is resolved that run. Each preserved mirror surfaces as an explicit `skip (freshness not evaluated — mirror preserved)` plan row — never a silent omission, never a close: a disabled check must never look identical to a resolved world.
+- Freshness was NOT determinately evaluated this run (the `citations_fresh` check is disabled, the pin file is malformed, a citing file's front matter is malformed — its citations could not be harvested, an evaluation is indeterminate, or a citation fails resolution): the absence of a fact is “not evaluated”, never “confirmed resolved” — no mirror is resolved that run. Each preserved mirror surfaces as an explicit `skip (freshness not evaluated — mirror preserved)` plan row — never a silent omission, never a close: a disabled check must never look identical to a resolved world.
 
 ## Requirements *(mandatory)*
 

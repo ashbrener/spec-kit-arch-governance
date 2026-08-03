@@ -88,8 +88,11 @@ class Issue:
 
 # ──────────────────────────── parsing ────────────────────────────
 
+_FM_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.S)
+
+
 def split_front_matter(text: str):
-    m = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", text, re.S)
+    m = _FM_RE.match(text)
     if m:
         try:
             fm = yaml.safe_load(m.group(1)) or {}
@@ -97,6 +100,22 @@ def split_front_matter(text: str):
             fm = {}
         return (fm if isinstance(fm, dict) else {}), m.group(2)
     return {}, text
+
+
+def front_matter_malformed(text: str) -> bool:
+    """A front-matter BLOCK exists but does not parse to a mapping (slice 007 R8's
+    harvest layer): a PARSE FAILURE of the citation source is 'cannot evaluate',
+    never 'citations absent'. A file with no front-matter block at all is NOT
+    malformed — its citations are honestly absent. Side-channel only: this never
+    changes what split_front_matter returns or any check's existing findings."""
+    m = _FM_RE.match(text)
+    if not m:
+        return False
+    try:
+        fm = yaml.safe_load(m.group(1))
+    except yaml.YAMLError:
+        return True
+    return fm is not None and not isinstance(fm, dict)
 
 
 def parse_status(fm: dict, body: str) -> str:
@@ -173,17 +192,29 @@ def scan_adrs(repo_root: Path, adr_dir: str, namespace: str = "") -> list[Adr]:
     return out
 
 
-def scan_citations(repo_root: Path, specs_dir: str, keys: CitationKeys, namespace: str = "") -> list[Citation]:
+def scan_citations(repo_root: Path, specs_dir: str, keys: CitationKeys, namespace: str = "",
+                   malformed: list | None = None) -> list[Citation]:
+    """Harvest citations. `malformed` (slice 007 R8, optional SIDE-CHANNEL): when a
+    list is passed, the relpath of every citing file whose front matter is present
+    but unparseable is appended — the harvested citation list itself is unchanged
+    (a malformed file yields no citations, exactly as before), so every existing
+    caller and check keeps byte-identical findings."""
     cits: list[Citation] = []
     d = repo_root / specs_dir
     if not d.is_dir():
         return cits
     for p in sorted(d.rglob("spec.md")):
-        fm, _ = split_front_matter(p.read_text(encoding="utf-8", errors="replace"))
+        text = p.read_text(encoding="utf-8", errors="replace")
+        if malformed is not None and front_matter_malformed(text):
+            malformed.append(str(p.relative_to(repo_root)))
+        fm, _ = split_front_matter(text)
         for v in _as_list(fm.get(keys.source_specs)):
             cits.append(Citation("derived_from", v, str(p.relative_to(repo_root))))
     for p in sorted(d.rglob("plan.md")):
-        fm, _ = split_front_matter(p.read_text(encoding="utf-8", errors="replace"))
+        text = p.read_text(encoding="utf-8", errors="replace")
+        if malformed is not None and front_matter_malformed(text):
+            malformed.append(str(p.relative_to(repo_root)))
+        fm, _ = split_front_matter(text)
         for v in _as_list(fm.get(keys.adrs)):
             # a bare `cites: ADR-NNN` is an intra-repo reference → qualify with this repo's
             # namespace; cross-repo references must already be fully qualified (FR-005).
@@ -351,7 +382,8 @@ def check_governance_adopted(repo_root, adr_dir, governance_adr) -> list[Issue]:
     return []
 
 
-def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_index, spec_index) -> list[Issue]:
+def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_index, spec_index,
+                          malformed_sources=()) -> list[Issue]:
     """The sixth check (slice 006): pinned citations still match the cited artifact's
     current content state. Strictly read-only — it NEVER writes pins (FR-011).
 
@@ -360,8 +392,19 @@ def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_inde
     cannot-evaluate → indeterminate note (FR-008). A citation already failing
     `citations_resolve` stays silent here — the resolve failure owns its story (FR-009);
     if that check is disabled, nobody owns it, so it degrades to an indeterminate note.
+
+    `malformed_sources` (slice 007 R8's harvest layer): citing files whose front
+    matter exists but does not parse. Their citations could not be HARVESTED — a
+    cannot-evaluate state, never "citations absent" — so each gets an indeterminate
+    note (flagged structurally), which keeps the emitter from reading the missing
+    facts as confirmed resolutions.
     """
     out: list[Issue] = []
+    for src in malformed_sources:
+        out.append(Issue("citations_fresh",
+                         f"front matter of {src} could not be parsed — the freshness of "
+                         f"its citations cannot be evaluated this run",
+                         src, severity="note", indeterminate=True))
     try:
         pins = P.load_pins(repo_root)
     except P.PinLoadError as exc:
@@ -450,14 +493,17 @@ def coverage_report(cfg: GovernanceConfig, repo_root: Path) -> list[Issue]:
 
 def validate(cfg: GovernanceConfig, repo_root: Path):
     this_adrs, adr_index, spec_index = build_indexes(cfg, repo_root)
-    cits = scan_citations(repo_root, cfg.specs_dir, cfg.citation_keys, cfg.namespace)
+    malformed_sources: list[str] = []
+    cits = scan_citations(repo_root, cfg.specs_dir, cfg.citation_keys, cfg.namespace,
+                          malformed_sources)
     runners = {
         "namespace_valid": lambda: check_namespace_valid(this_adrs, cfg.namespace),
         "citations_resolve": lambda: check_citations_resolve(cits, adr_index, spec_index),
         "citations_current": lambda: check_citations_current(cits, adr_index),
         "adr_immutability": lambda: check_adr_immutability(this_adrs, repo_root),
         "governance_adopted": lambda: check_governance_adopted(repo_root, cfg.adr_dir, cfg.governance_adr),
-        "citations_fresh": lambda: check_citations_fresh(cfg, repo_root, cits, adr_index, spec_index),
+        "citations_fresh": lambda: check_citations_fresh(cfg, repo_root, cits, adr_index,
+                                                         spec_index, malformed_sources),
     }
     issues: list[Issue] = []
     for name, fn in runners.items():
