@@ -88,7 +88,10 @@ def repin_plan(cfg, repo_root: Path, selector: Optional[str] = None,
         pins = {}
     seen: set[P.PinKey] = set()
     for c in cits:
-        k = (c.source, c.relation, c.value)
+        # pin identity = POSIX citing path + relation + the RAW slot value as authored
+        # (FR-003); the qualified c.value is used for RESOLUTION only — so a namespace
+        # change never orphans/recreates a pin whose citation text never changed.
+        k = P.pin_key(c.source, c.relation, c.raw)
         if k in seen:
             continue
         seen.add(k)

@@ -52,8 +52,13 @@ class Adr:
 @dataclass
 class Citation:
     relation: str          # derived_from | cites
-    value: str             # raw reference token
+    value: str             # RESOLUTION form (a bare cites is namespace-qualified here)
     source: str            # the spec/plan file that declares it (relpath)
+    raw: str = ""          # the slot value EXACTLY as written — the pin identity (FR-003)
+
+    def __post_init__(self):
+        if not self.raw:
+            self.raw = self.value
 
 
 @dataclass
@@ -156,7 +161,9 @@ def scan_citations(repo_root: Path, specs_dir: str, keys: CitationKeys, namespac
         for v in _as_list(fm.get(keys.adrs)):
             # a bare `cites: ADR-NNN` is an intra-repo reference → qualify with this repo's
             # namespace; cross-repo references must already be fully qualified (FR-005).
-            cits.append(Citation("cites", qualify(v, namespace), str(p.relative_to(repo_root))))
+            # `raw` keeps the value as authored — pins key on it, so a namespace change
+            # never orphans a pin whose citation text never changed (slice 006, FR-003).
+            cits.append(Citation("cites", qualify(v, namespace), str(p.relative_to(repo_root)), raw=v))
     return cits
 
 
@@ -295,7 +302,9 @@ def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_inde
         pins = {}
     keys_seen: set[P.PinKey] = set()
     for c in cits:
-        k = (c.source, c.relation, c.value)
+        # pin identity keys on the RAW slot value (as authored) + POSIX-normalized citing
+        # path; the qualified c.value is used for RESOLUTION only (FR-003).
+        k = P.pin_key(c.source, c.relation, c.raw)
         if k in keys_seen:
             continue  # duplicate slot entry — one verdict per pin key
         keys_seen.add(k)
@@ -303,24 +312,24 @@ def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_inde
         if not resolves:
             if not cfg.checks.citations_resolve:
                 out.append(Issue("citations_fresh",
-                                 f"{c.relation} {c.value!r}: freshness indeterminate — the citation does "
+                                 f"{c.relation} {c.raw!r}: freshness indeterminate — the citation does "
                                  f"not resolve (and citations_resolve is disabled)",
                                  c.source, severity="note"))
             continue  # FR-009: the citations_resolve failure owns this citation's story
         pin = pins.get(k)
         if pin is None:
             out.append(Issue("citations_fresh",
-                             f"{c.relation} {c.value!r} is unpinned — run `repin --apply` to start "
+                             f"{c.relation} {c.raw!r} is unpinned — run `repin --apply` to start "
                              f"freshness tracking", c.source, severity="note"))
             continue
         t = P.resolve_target(cfg, repo_root, c.relation, c.value, adr_index)
         if t.status != "ok":
             out.append(Issue("citations_fresh",
-                             f"{c.relation} {c.value!r}: freshness indeterminate — {t.reason}",
+                             f"{c.relation} {c.raw!r}: freshness indeterminate — {t.reason}",
                              c.source, severity="note"))
         elif t.digest != pin.digest:
             out.append(Issue("citations_fresh",
-                             f"{c.relation} {c.value!r} is STALE — {t.display} changed since it was "
+                             f"{c.relation} {c.raw!r} is STALE — {t.display} changed since it was "
                              f"pinned (pinned {P.abbrev(pin.digest)}, current {P.abbrev(t.digest)}); "
                              f"review the upstream change, then `repin`", c.source))
     for k in sorted(pins):

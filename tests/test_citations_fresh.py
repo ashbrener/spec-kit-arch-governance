@@ -100,6 +100,33 @@ def test_pins_to_yaml_is_deterministic():
     assert P.pins_to_yaml([p1, p2]) == P.pins_to_yaml([p2, p1])   # sorted by key
 
 
+def test_pin_paths_are_platform_independent():
+    """Persisted paths normalize to '/' on write, read, and comparison — a native
+    Windows path and its POSIX form are the SAME pin identity."""
+    assert P.pin_key("specs\\x\\plan.md", "cites", "ADR-001") == \
+        P.pin_key("specs/x/plan.md", "cites", "ADR-001")
+    win = P.Pin("specs\\x\\plan.md", "cites", "ADR-001", "docs\\adr\\ADR-001.md",
+                "sha256:aa", "2026-08-03")
+    assert win.key == ("specs/x/plan.md", "cites", "ADR-001")
+    out = P.pins_to_yaml([win])
+    assert "\\" not in out and "specs/x/plan.md" in out and "docs/adr/ADR-001.md" in out
+
+
+def test_pin_file_with_native_windows_separators_still_matches(tmp_path):
+    """A pin file written with backslash separators (a Windows checkout) must match a
+    POSIX scan — not report valid pins as simultaneously unpinned AND orphaned."""
+    _, build = _domain(tmp_path)
+    _pin(build)
+    f = build / P.PIN_FILE
+    f.write_text(f.read_text().replace("specs/001-derived/", "specs\\001-derived\\"))
+    assert "specs\\001-derived\\" in f.read_text()                # the fixture really is native
+    _, _, issues = _validate(build)
+    assert _fresh(issues) == []          # matched: no nudge, no orphan, no stale
+    cfg, root = V.load_config(build)
+    plan = R.repin_plan(cfg, root)       # and repin agrees: everything is up to date
+    assert {e.action for e in plan.entries} == {"up-to-date"} and plan.changes == []
+
+
 # ── US1: detection ──
 
 def test_fresh_pins_produce_no_findings(tmp_path):

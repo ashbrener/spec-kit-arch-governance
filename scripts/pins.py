@@ -33,6 +33,20 @@ CONFIG_NAMES = (".spec-arch-governance.yml", ".spec-arch-governance.yaml")
 # (citing artifact relpath, relation, citation value exactly as written) — FR-003.
 PinKey = tuple[str, str, str]
 
+
+def _posix(s) -> str:
+    """Persisted paths are platform-independent: normalized to '/' on write AND on
+    comparison/read, so a pin file written on one platform matches a scan on any other."""
+    return str(s).replace("\\", "/")
+
+
+def pin_key(citing: str, relation: str, value: str) -> PinKey:
+    """The canonical pin identity (FR-003): POSIX-normalized citing relpath + relation +
+    the citation value EXACTLY as written in the slot (the RAW form — never the
+    namespace-qualified one, so a namespace change cannot orphan or recreate a pin
+    whose citation text never changed)."""
+    return (_posix(citing), relation, value)
+
 _HEADER = (
     "# Watermark pins (spec-kit-arch-governance, slice 006) — GENERATED, do not hand-edit.\n"
     "# Written ONLY by `repin --apply`; tracked in git (this file's history is the audit\n"
@@ -51,7 +65,7 @@ class Pin:
 
     @property
     def key(self) -> PinKey:
-        return (self.citing, self.relation, self.value)
+        return pin_key(self.citing, self.relation, self.value)
 
 
 class PinLoadError(Exception):
@@ -81,8 +95,10 @@ def load_pins(repo_root) -> dict[PinKey, Pin]:
         if data is None:
             return {}
         pins = [
-            Pin(citing=str(e["citing"]), relation=str(e["relation"]), value=str(e["value"]),
-                path=str(e.get("path", "")), digest=str(e["digest"]),
+            # paths normalized on READ too, so an existing native-separator pin file
+            # (e.g. one written on Windows) still matches a POSIX scan
+            Pin(citing=_posix(e["citing"]), relation=str(e["relation"]), value=str(e["value"]),
+                path=_posix(e.get("path", "")), digest=str(e["digest"]),
                 pinned=str(e.get("pinned", "")))
             for e in data["pins"]
         ]
@@ -97,8 +113,9 @@ def pins_to_yaml(pins) -> str:
     body = {
         "version": "v1",
         "pins": [
-            {"citing": p.citing, "relation": p.relation, "value": p.value,
-             "path": p.path, "digest": p.digest, "pinned": p.pinned}
+            # paths normalized on WRITE: the persisted file is platform-independent
+            {"citing": _posix(p.citing), "relation": p.relation, "value": p.value,
+             "path": _posix(p.path), "digest": p.digest, "pinned": p.pinned}
             for p in sorted(pins, key=lambda p: p.key)
         ],
     }

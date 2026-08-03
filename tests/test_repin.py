@@ -20,7 +20,9 @@ import pins as P  # noqa: E402
 import repin as R  # noqa: E402
 import validate as V  # noqa: E402
 
-from test_citations_fresh import ADR_BODY, UPSTREAM_SPEC, _domain, _fresh, _fresh_fails  # noqa: E402
+from test_citations_fresh import (  # noqa: E402
+    ADR_BODY, BUILD_CHECKS, UPSTREAM_SPEC, _domain, _fresh, _fresh_fails,
+)
 
 
 def _tree_bytes(root: Path) -> dict:
@@ -182,6 +184,35 @@ def test_blocking_flip_refused_on_stale_but_not_on_unpinned(tmp_path):
         assert "STALE" in str(e)
     R.main([str(build), "--apply"])                          # reconcile
     I.guard_blocking_transition(blocking, root)              # flip allowed again
+
+
+# ── pin identity: the RAW slot value, never the qualified form (FR-003) ──
+
+def test_repo_local_bare_citation_pins_raw_value_and_survives_namespace_change(tmp_path):
+    """A repo-local `cites: ADR-001` is qualified to <NS>-ADR-001 for RESOLUTION, but the
+    pin key must keep the value exactly as authored — so a namespace change (which never
+    touched the citation text) does not orphan/recreate the pin."""
+    app = tmp_path / "app"
+    (app / "docs" / "adr").mkdir(parents=True)
+    (app / "docs" / "adr" / "ADR-001-ruling.md").write_text(
+        "---\nid: ADR-001\nstatus: accepted\n---\n# ADR-001 — ruling\n\nBody.\n\n## Amendments\n")
+    (app / "specs" / "001-x").mkdir(parents=True)
+    (app / "specs" / "001-x" / "spec.md").write_text("---\nderived_from: []\n---\n# s\n")
+    (app / "specs" / "001-x" / "plan.md").write_text("---\ncites:\n  - ADR-001\n---\n# p\n")
+    cfg_body = ("version: v1\nrole: standalone\nnamespace: <NS>\nmode: advisory\n"
+                "adr_dir: docs/adr\nspecs_dir: specs\nsources: []\n" + BUILD_CHECKS)
+    (app / ".spec-arch-governance.yml").write_text(cfg_body.replace("<NS>", "APP"))
+    assert R.main([str(app), "--apply"]) == 0
+    pins = _pins(app)
+    assert ("specs/001-x/plan.md", "cites", "ADR-001") in pins       # RAW, as authored
+    assert all("APP-ADR-001" != k[2] for k in pins)                  # never the qualified form
+    # the namespace changes; the citation text did not — the pin must survive untouched
+    (app / ".spec-arch-governance.yml").write_text(cfg_body.replace("<NS>", "XYZ"))
+    cfg, root = V.load_config(app)
+    issues, _ = V.validate(cfg, root)
+    assert _fresh(issues) == []          # fresh: no unpinned nudge, no orphan, no stale
+    plan = R.repin_plan(cfg, root)
+    assert {e.action for e in plan.entries} == {"up-to-date"} and plan.changes == []
 
 
 # ── the pin record shape (FR-003) ──
