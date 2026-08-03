@@ -152,7 +152,16 @@ The finding flows through the machinery that already exists — no new hooks, no
 - A future slice will EMIT from validated staleness facts (notifications, issues). This slice only *produces and enforces* the facts; nothing here may assume or require a push mechanism.
 - Out of scope, restated: push/notification mechanisms, semantic classification of the upstream diff (breaking vs editorial), and code-level staleness (`implements` relations).
 
-## Open Questions *(operator-level tradeoffs — deliberately not decided here)*
+## Clarifications
+
+### Session 2026-08-03 (operator review — all four open questions ratified at the proposed defaults)
+
+- **OQ-1 → RESOLVED: writer-internal.** `.spec-arch-pins.yml` gets no published schema in this slice; readers neither need it nor break on it. Promotion to a published contract is additive later, when a reader actually asks for freshness signal.
+- **OQ-2 → RESOLVED: repo-level mode only.** A determinate stale pin halts under `mode: blocking` exactly like the five existing checks — one enforcement dial, no per-check severity surface. Wary repos adopt in advisory mode first.
+- **OQ-3 → RESOLVED: spec.md only.** `derived_from` pins the upstream feature's spec.md (D3 stands). Precision over sensitivity: plan/tasks churn never reads as staleness.
+- **OQ-4 → RESOLVED: print the nudge.** `install` never writes pins; it ends by printing the exact `repin --apply` command. FR-011's writer boundary stays crisp.
+
+## Open Questions *(resolved 2026-08-03 — retained for audit; see Clarifications)*
 
 - **OQ-1 — Publish the pin file as a reader contract?** Should `.spec-arch-pins.yml` get a published schema beside `domain.schema.json` (plus an ARCH-ADR-000 amendment and a minor vocabulary bump) so readers can render freshness signal — or stay writer-internal until a reader actually asks for it? Default proposed: writer-internal now; promotion is additive later. [NEEDS CLARIFICATION: does the first reader (spec-kit-synthesis) want freshness signal in its first governed-repo pass?]
 - **OQ-2 — Should freshness get its own proving period before it can halt?** As specced (D5/FR-012), a determinate stale pin halts under `mode: blocking` immediately, like any other failing check. Alternative: a per-check severity override (e.g. `citations_fresh: advisory`) so a repo already in blocking mode can adopt pinning without staleness gaining halt power until proven. This adds config surface; advisory-before-blocking may argue for it. [NEEDS CLARIFICATION: is per-check mode override wanted, or is the repo-level mode the only enforcement dial — as it has been for all five existing checks?]
