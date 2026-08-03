@@ -8,3 +8,5 @@
 /.venv          export-ignore
 /.github        export-ignore
 /HANDOFF.md     export-ignore
+# This repo's own dogfood pin state (its entries reference the excluded /specs history).
+/.spec-arch-pins.yml  export-ignore

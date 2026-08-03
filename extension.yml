@@ -20,7 +20,10 @@ extension:
   # 1.0.0 — the full convention is built and dogfooded: born-compliant templates, the read-only
   # validator + lifecycle hooks, the blocking gate, namespace-by-role (zero-rename), and the
   # multi-repo domain manifest + sync. Advisory remains the default; blocking is a guarded flip.
-  version: "1.0.1"
+  # 1.1.0 — citations_fresh (slice 006): watermark pins close the reverse-propagation gap —
+  # a sixth read-only check surfaces upstream content movement on pinned citations, and the
+  # new `repin` verb (dry-run default) is the one and only writer of the pin sidecar.
+  version: "1.1.0"
   description: "Keep specs, code & ADRs in sync — born-compliant citation slots + a read-only fail-closed validator on every spec and plan."
   author: "Ash Brener"
   repository: "https://github.com/ashbrener/spec-kit-arch-governance"
@@ -37,7 +40,7 @@ provides:
   # The slash-command surface. `file` is relative to this extension's root and
   # points at the Markdown body the host agent runs for that command.
   commands:
-    # The teeth — read-only. Runs the five ARCH-ADR-000 checks against the repo
+    # The teeth — read-only. Runs the six ARCH-ADR-000 checks against the repo
     # and reports PASS / ADVISORY / FAIL. Every lifecycle hook below points here.
     - name: "speckit.arch-governance.validate"
       file: "commands/validate.md"
@@ -61,6 +64,13 @@ provides:
     - name: "speckit.arch-governance.sync"
       file: "commands/sync.md"
       description: "Reconcile this repo against its domain manifest (pull its own config from the shared record). Dry-run by default; writes only this repo, never a peer or remote."
+
+    # The pin reconciler — refresh watermark pins against upstream content (slice 006).
+    # Dry-run by default; --apply writes ONLY this repo's .spec-arch-pins.yml — the one
+    # and only writer of pins (validate/gate/hooks/install/sync never touch them).
+    - name: "speckit.arch-governance.repin"
+      file: "commands/repin.md"
+      description: "Reconcile watermark pins against upstream content: a per-citation plan (create/refresh/prune), dry-run by default; --apply writes only this repo's pin file."
 
   # Informational: the per-repo config the install ceremony writes. The CLI does
   # not auto-copy this; `speckit.arch-governance.install` creates it from the

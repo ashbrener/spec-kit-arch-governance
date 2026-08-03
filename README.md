@@ -4,7 +4,7 @@
 
 A standalone, interview-driven [SpecKit](https://github.com/github/spec-kit) extension that stops a project's **specifications, code, and architecture decisions** from drifting apart — regardless of how many repos the project has or what they're named. It discovers your topology by asking at install, makes typed citations between specs/plans/ADRs *exist* (templates), stay *true* (validator), and get *enforced* (lifecycle hooks). For multi-repo projects it ships a shared **domain manifest** so every repo self-configures with no fleet manager.
 
-**Version:** 1.0.0 · **Requires:** spec-kit ≥ 0.1.0 · **License:** MIT · **Provides:** 4 commands, 3 hooks
+**Version:** 1.1.0 · **Requires:** spec-kit ≥ 0.1.0 · **License:** MIT · **Provides:** 5 commands, 3 hooks
 **Repository:** <https://github.com/ashbrener/spec-kit-arch-governance>
 
 > Citation/architecture **integrity** — *not* access control, and not generic “architecture linting.” It governs whether spec↔code↔ADR citations resolve, stay current, and remain immutable.
@@ -27,6 +27,7 @@ SpecKit drives **spec → code** (forward). Nothing drives **code → spec** (re
 | a deleted/superseded ADR leaves dangling references nobody notices | the validator flags the broken citation, with the exact file and line |
 | adding citations is manual, so nobody does it | specs/plans are **born** with `derived_from:` / `cites:` slots |
 | multi-repo references go stale, namespaces collide | one shared manifest is the registry; cross-repo citations are validated |
+| a cited upstream spec/ADR *changes* and the citing repo never hears about it | watermark **pins** record the accepted upstream state; `citations_fresh` surfaces the drift; `repin` reconciles it explicitly |
 | enforcement is all-or-nothing | **advisory by default**; you flip to blocking per-repo only once it’s proven clean |
 
 ---
@@ -43,7 +44,7 @@ flowchart LR
         I["/speckit.implement"]
     end
     subgraph GOV["arch-governance (read-only)"]
-        V["validate<br/>5 ARCH-ADR-000 checks"]
+        V["validate<br/>6 ARCH-ADR-000 checks"]
         G["gate<br/>proceed / warn / halt"]
     end
     S -->|after_specify| V
@@ -59,10 +60,10 @@ flowchart LR
 ```
 
 1. **Exist** — born-compliant templates: install patches your `.specify/templates/{spec,plan}-template.md` so every generated spec carries a `derived_from:` slot and every plan a `cites:` slot. Adoption becomes the path of least resistance.
-2. **True** — the read-only validator runs the five checks (below) on demand, in CI, and via hooks.
+2. **True** — the read-only validator runs the six checks (below) on demand, in CI, and via hooks.
 3. **Enforced** — `after_specify` / `after_plan` validate the new artefact; `before_implement` gates it. In `mode: advisory` everything only warns; flip a repo to `mode: blocking` (a guarded transition) and the gate refuses to start implementation while a citation is broken.
 
-### What it enforces — the five checks (ARCH-ADR-000)
+### What it enforces — the six checks (ARCH-ADR-000)
 
 | Check | What it guarantees |
 |---|---|
@@ -71,6 +72,28 @@ flowchart LR
 | `namespace_valid` | ADR IDs are well-formed and use this repo’s namespace |
 | `adr_immutability` | accepted ADR bodies (above `## Amendments`) are unchanged since first commit |
 | `governance_adopted` | the ADR README references the adopted governance ruling |
+| `citations_fresh` | **pinned** citations still match the cited artifact’s current content (a stale pin = the upstream spec/ADR moved since you accepted it) |
+
+### Freshness — watermark pins + explicit `repin`
+
+The five original checks test *existence* and *status*; none can see a cited artifact whose
+**content** changed after you derived from it (the reverse-propagation gap). Slice 006 closes it:
+
+- **Pins** live in a per-repo, generated, git-tracked sidecar `.spec-arch-pins.yml` — the citation
+  slots in your specs/plans are untouched, and the reader contract stays at vocabulary `0.3.0`.
+  Each pin records the cited artifact’s content state (a line-ending-normalized SHA-256):
+  `derived_from` pins the upstream feature’s `spec.md`; `cites` pins the full ADR file, so an
+  appended amendment registers as movement. Offline and deterministic — no git or network access
+  to the peer.
+- **Detection**: a pinned citation whose upstream moved becomes a failure-severity
+  `citations_fresh` finding (warns in `advisory`, **halts** `before_implement` in `blocking`).
+- **Graceful adoption**: an *unpinned* citation is only ever a `note`-severity nudge — in every
+  mode. No pin file, no change to your results. Seed the whole repo once with `repin --apply`.
+- **Fail-safe**: an unreachable peer, unreadable artifact, or malformed pin file degrades to an
+  indeterminate note — never a crash, never a false block. Only a *determinate* stale pin halts.
+- **Explicit reconcile**: `repin` is dry-run by default (a per-citation plan: create / refresh /
+  prune), and `repin --apply` is the **only** writer of pins — the pin file’s git history is the
+  audit trail of which upstream state was accepted, and when.
 
 ---
 
@@ -148,10 +171,11 @@ Cross-repo citations use the fully-qualified form (`CORE-ADR-007`); a bare `ADR-
 
 | Command | Runs | What it does |
 |---|---|---|
-| `speckit.arch-governance.validate` | on demand · `after_specify` · `after_plan` · CI | read-only — the five checks → PASS / ADVISORY / FAIL |
+| `speckit.arch-governance.validate` | on demand · `after_specify` · `after_plan` · CI | read-only — the six checks → PASS / ADVISORY / FAIL |
 | `speckit.arch-governance.gate` | `before_implement` | proceed / warn / **halt** (blocking) — fail-closed, read-only |
-| `speckit.arch-governance.install` | once per repo | interview → config, scaffold ADR, born-compliant templates |
+| `speckit.arch-governance.install` | once per repo | interview → config, scaffold ADR, born-compliant templates (never writes pins — it prints the `repin --apply` command) |
 | `speckit.arch-governance.sync` | on demand | reconcile a repo against the domain manifest — **dry-run by default** |
+| `speckit.arch-governance.repin` | on demand, after reviewing upstream changes | reconcile watermark pins against upstream content — **dry-run by default**; `--apply` writes only this repo’s `.spec-arch-pins.yml` (the only pin writer) |
 
 | Hook | Command | Effect (advisory default) |
 |---|---|---|

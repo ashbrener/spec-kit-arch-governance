@@ -1,0 +1,41 @@
+# Watermark pins (spec-kit-arch-governance, slice 006) — GENERATED, do not hand-edit.
+# Written ONLY by `repin --apply`; tracked in git (this file's history is the audit
+# trail of which upstream states were accepted, and when). Writer-internal format.
+version: v1
+pins:
+- citing: specs/001-blocking-enforcement-gate/plan.md
+  relation: cites
+  value: ARCH-ADR-000
+  path: docs/adr/ARCH-ADR-000-shared-vocabulary.md
+  digest: sha256:74a10e5649e2371e041c166a2cb9da05e5f2f2dffb4e0c36006f71581f9afcba
+  pinned: '2026-08-03'
+- citing: specs/002-namespace-by-role/plan.md
+  relation: cites
+  value: ARCH-ADR-000
+  path: docs/adr/ARCH-ADR-000-shared-vocabulary.md
+  digest: sha256:74a10e5649e2371e041c166a2cb9da05e5f2f2dffb4e0c36006f71581f9afcba
+  pinned: '2026-08-03'
+- citing: specs/003-domain-manifest-sync/plan.md
+  relation: cites
+  value: ARCH-ADR-000
+  path: docs/adr/ARCH-ADR-000-shared-vocabulary.md
+  digest: sha256:74a10e5649e2371e041c166a2cb9da05e5f2f2dffb4e0c36006f71581f9afcba
+  pinned: '2026-08-03'
+- citing: specs/004-domain-contract/plan.md
+  relation: cites
+  value: ARCH-ADR-000
+  path: docs/adr/ARCH-ADR-000-shared-vocabulary.md
+  digest: sha256:74a10e5649e2371e041c166a2cb9da05e5f2f2dffb4e0c36006f71581f9afcba
+  pinned: '2026-08-03'
+- citing: specs/005-citation-contract/plan.md
+  relation: cites
+  value: ARCH-ADR-000
+  path: docs/adr/ARCH-ADR-000-shared-vocabulary.md
+  digest: sha256:74a10e5649e2371e041c166a2cb9da05e5f2f2dffb4e0c36006f71581f9afcba
+  pinned: '2026-08-03'
+- citing: specs/006-citations-fresh/plan.md
+  relation: cites
+  value: ARCH-ADR-000
+  path: docs/adr/ARCH-ADR-000-shared-vocabulary.md
+  digest: sha256:74a10e5649e2371e041c166a2cb9da05e5f2f2dffb4e0c36006f71581f9afcba
+  pinned: '2026-08-03'

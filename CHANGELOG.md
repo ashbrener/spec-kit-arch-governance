@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-08-03
+
+**citations_fresh** (slice `specs/006-citations-fresh/`) — closes the reverse-propagation gap the
+README names: when a cited upstream artifact *changes*, the citing repo now learns about it. No
+contract change (`vocabulary.json` stays `0.3.0`; the citation slots in authored specs/plans are
+untouched — the pin sidecar is writer-internal in this slice).
+
+### Added
+- **Watermark pins** — a per-repo, generated, git-tracked sidecar `.spec-arch-pins.yml` recording each pinned citation's accepted upstream content state (SHA-256, CRLF→LF normalized; offline and deterministic — no git or network access to the peer). Keyed per *(citing artifact, relation, citation value)*. What is hashed per relation: `derived_from` pins the upstream feature's **spec.md**; `cites` pins the **full ADR file**, so an appended amendment registers as movement.
+- **A sixth read-only check, `citations_fresh`** (`scripts/validate.py` + `scripts/pins.py`) — default-enabled, individually disableable, riding the existing hooks (no new lifecycle events). Severity ladder: only a **determinate** stale pin is failure-severity (warns in `advisory`; **halts** `before_implement` in `blocking` via the existing gate). Unpinned citations are advisory **nudges in every mode** (graceful adoption — a repo that never pins keeps today's behaviour); orphaned pins are prunable notes; every cannot-evaluate state (unreachable peer, unlisted member, unreadable artifact, malformed pin file) degrades to an **indeterminate note** — never a crash, never a false block. A citation already failing `citations_resolve` is never double-reported. The guarded blocking-flip accounts for staleness (a stale pin refuses the flip; unpinned notes do not).
+- **A `repin` verb** (`scripts/repin.py`, `commands/repin.md`, `speckit.arch-governance.repin`) — the explicit, auditable reconcile flow, copying `sync`'s proven contract: **dry-run by default** (a per-citation plan: create / refresh / prune / up-to-date / skip, with pinned→current states); `--apply` writes **only this repo's** pin file — never a peer, never a remote, never the citing spec/plan files; an optional selector limits the operation; a citation failing `citations_resolve` is skipped with a note (a pin never launders a broken citation). `repin --apply` is the **only** writer of pins anywhere — the pin file's git history is the audit trail of *which upstream state was accepted, and when*.
+- The install ceremony now ends by printing the exact `repin --apply` command — install itself **never** writes pins.
+- This repo dogfoods the slice: its own `cites: ARCH-ADR-000` citations are pinned (`.spec-arch-pins.yml` committed).
+
+### Changed
+- Extension manifest version `1.0.1` → `1.1.0` (a fifth command + a sixth check; additive).
+- The "five checks" surfaces (README, DESIGN §7, `config.example.yml`, manifest comments) now describe the six checks and the pin/repin flow, including the fail-safe and adoption semantics.
+
 ## [1.0.1] — 2026-06-24
 
 Release-packaging + documentation polish on top of `1.0.0`. No behaviour change to the validator,

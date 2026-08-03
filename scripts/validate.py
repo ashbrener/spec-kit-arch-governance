@@ -1,7 +1,7 @@
 """validate.py — the spec-kit-arch-governance teeth: a read-only citation validator.
 
 Reads a per-repo `.spec-arch-governance.yml`, scans the repo's specs + ADRs, and runs the
-five checks defined by ARCH-ADR-000 (docs/adr). It NEVER mutates a repo. Output is
+six checks defined by ARCH-ADR-000 (docs/adr). It NEVER mutates a repo. Output is
 `PASS` / `ADVISORY (n)` / `FAIL (n)`; exit is 0 unless mode=blocking has failing issues.
 
     uv run python scripts/validate.py <repo-dir-or-config.yml>
@@ -12,6 +12,8 @@ The checks (DESIGN §7):
   citations_current  — cited ADRs aren't Superseded / Deprecated
   adr_immutability   — accepted ADR bodies (above '## Amendments') unchanged since first commit
   governance_adopted — the ADR dir's README references the governance ADR
+  citations_fresh    — pinned citations still match the cited artifact's current content state
+                       (slice 006; stale = failure, unpinned/orphaned/indeterminate = note)
 """
 
 from __future__ import annotations
@@ -26,6 +28,8 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import CitationKeys, GovernanceConfig  # noqa: E402
+import pins as P  # noqa: E402
+from pins import CONFIG_NAMES  # noqa: E402  (single definition; also used by templates.py as V.CONFIG_NAMES)
 
 ADR_ID_RE = re.compile(r"^[A-Z][A-Z0-9]*-ADR-\d{3,}$")
 ADR_ID_IN = re.compile(r"\b([A-Z][A-Z0-9]*-ADR-\d{3,})\b")
@@ -33,7 +37,6 @@ BARE_ADR_RE = re.compile(r"^ADR-\d{3,}$")          # un-prefixed id: inherits th
 BARE_ADR_IN = re.compile(r"\bADR-\d{3,}\b")         # un-prefixed id within a filename
 AMENDMENTS_RE = re.compile(r"(?im)^\s*##\s+amendments\s*$")
 STATUS_RE = re.compile(r"(?im)\bstatus\b\s*[:*\s]+\s*([A-Za-z]+)")
-CONFIG_NAMES = (".spec-arch-governance.yml", ".spec-arch-governance.yaml")
 
 
 @dataclass
@@ -49,8 +52,13 @@ class Adr:
 @dataclass
 class Citation:
     relation: str          # derived_from | cites
-    value: str             # raw reference token
+    value: str             # RESOLUTION form (a bare cites is namespace-qualified here)
     source: str            # the spec/plan file that declares it (relpath)
+    raw: str = ""          # the slot value EXACTLY as written — the pin identity (FR-003)
+
+    def __post_init__(self):
+        if not self.raw:
+            self.raw = self.value
 
 
 @dataclass
@@ -117,8 +125,21 @@ def scan_adrs(repo_root: Path, adr_dir: str, namespace: str = "") -> list[Adr]:
     if not d.is_dir():
         return out
     for p in sorted(d.rglob("*.md")):
-        text = p.read_text(encoding="utf-8", errors="replace")
-        fm, body = split_front_matter(text)
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            # Fail-safe (FR-008): an unreadable ADR must not abort index construction —
+            # that would crash validation (and the lifecycle hooks) BEFORE the freshness
+            # check's own unreadable/indeterminate handling ever ran. Index it from its
+            # filename so citations still RESOLVE; content-dependent checks skip it
+            # (status 'unknown' is neither accepted nor superseded), and a pinned
+            # citation to it degrades to the indeterminate note when hashing fails.
+            text = None
+        if text is None:
+            fm, body, status = {}, "", "unknown"
+        else:
+            fm, body = split_front_matter(text)
+            status = parse_status(fm, body)
         adr_id = str(fm.get("id") or "").strip()
         if not adr_id:
             m = ADR_ID_IN.search(p.stem)        # prefer a fully-qualified id in the filename
@@ -132,7 +153,7 @@ def scan_adrs(repo_root: Path, adr_dir: str, namespace: str = "") -> list[Adr]:
         adr_id = qualify(adr_id, namespace)
         ns = adr_id.split("-ADR-")[0] if "-ADR-" in adr_id else ""
         out.append(Adr(
-            id=adr_id, namespace=ns, status=parse_status(fm, body),
+            id=adr_id, namespace=ns, status=status,
             relpath=str(p.relative_to(repo_root)), repo_root=repo_root,
             body_top=body_above_amendments(body),
         ))
@@ -153,13 +174,18 @@ def scan_citations(repo_root: Path, specs_dir: str, keys: CitationKeys, namespac
         for v in _as_list(fm.get(keys.adrs)):
             # a bare `cites: ADR-NNN` is an intra-repo reference → qualify with this repo's
             # namespace; cross-repo references must already be fully qualified (FR-005).
-            cits.append(Citation("cites", qualify(v, namespace), str(p.relative_to(repo_root))))
+            # `raw` keeps the value as authored — pins key on it, so a namespace change
+            # never orphans a pin whose citation text never changed (slice 006, FR-003).
+            cits.append(Citation("cites", qualify(v, namespace), str(p.relative_to(repo_root)), raw=v))
     return cits
 
 
-def _spec_ids(root: Path, specs_dir: str) -> set[str]:
+def _spec_ids(root: Path, specs_dir: str) -> dict[str, Path]:
+    """Feature id → its spec.md path, indexed RECURSIVELY (a nested specs/group/NNN-x/
+    layout counts). The PATH is retained so freshness/repin resolve through this same
+    index instead of reconstructing a flat layout that a nested feature would fail."""
     d = root / specs_dir
-    return {p.parent.name for p in d.rglob("spec.md")} if d.is_dir() else set()
+    return {p.parent.name: p for p in sorted(d.rglob("spec.md"))} if d.is_dir() else {}
 
 
 def load_config(path) -> tuple[GovernanceConfig, Path]:
@@ -178,33 +204,66 @@ def _source_root(repo_root: Path, src) -> Path:
     return (repo_root / src.locator).resolve()
 
 
+def _recover_unreadable_pinned_adrs(cfg: GovernanceConfig, repo_root: Path, adr_index) -> None:
+    """Fail-safe recovery (research R13): an ADR whose id exists ONLY in front matter
+    cannot be identified from its filename when the file is unreadable, so scan_adrs
+    skips it — and a PINNED citation to it would fail citations_resolve, a determinate
+    failure (gate-halting in blocking) for what is really a cannot-evaluate state.
+
+    The pin file is a recorded, operator-written, git-tracked id→path association.
+    When a pinned `cites` value is missing from the index AND its recorded path still
+    EXISTS but is UNREADABLE, re-index it from the pin (status 'unknown': content
+    checks skip it) so the citation resolves and freshness owns the story with its
+    indeterminate note. Contract-honest boundaries: a recorded path that is GONE stays
+    a resolve failure (FR-009 — the target really is missing), and a READABLE file that
+    scan_adrs did not recognize is never invented into an ADR."""
+    try:
+        pins = P.load_pins(repo_root)
+    except P.PinLoadError:
+        return   # a malformed pin file already owns its story (the single note)
+    for pin in pins.values():
+        if pin.relation != "cites" or not pin.path:
+            continue
+        vid = qualify(pin.value, cfg.namespace)
+        if vid in adr_index:
+            continue
+        p = repo_root / pin.path
+        if not p.is_file():
+            continue          # target truly gone — a resolve failure is the honest verdict
+        try:
+            p.read_bytes()
+            continue          # readable yet unindexed — not an ADR; do not invent one
+        except OSError:
+            pass              # exists but unreadable: the cannot-evaluate state
+        ns = vid.split("-ADR-")[0] if "-ADR-" in vid else ""
+        adr_index[vid] = Adr(id=vid, namespace=ns, status="unknown",
+                             relpath=pin.path, repo_root=repo_root, body_top="")
+
+
 def build_indexes(cfg: GovernanceConfig, repo_root: Path):
     this_adrs = scan_adrs(repo_root, cfg.adr_dir, cfg.namespace)
     adr_index = {a.id: a for a in this_adrs}
-    spec_index: dict[str, set[str]] = {"": _spec_ids(repo_root, cfg.specs_dir)}
+    spec_index: dict[str, dict[str, Path]] = {"": _spec_ids(repo_root, cfg.specs_dir)}
     for src in cfg.sources:
         sroot = _source_root(repo_root, src)
-        s_adr_dir, s_specs_dir, s_namespace = cfg.adr_dir, cfg.specs_dir, ""
-        for name in CONFIG_NAMES:
-            f = sroot / name
-            if f.is_file():
-                try:
-                    scfg = GovernanceConfig.model_validate(yaml.safe_load(f.read_text()) or {})
-                    s_adr_dir, s_specs_dir, s_namespace = scfg.adr_dir, scfg.specs_dir, scfg.namespace
-                except Exception:
-                    pass
-                break
+        # the peer's own layout, via the single shared peek (pins.peer_layout, R1)
+        s_adr_dir, s_specs_dir, s_namespace = P.peer_layout(sroot, cfg)
         # a source's bare ADR-NNN is qualified with the SOURCE's own namespace, so cross-repo
         # citations only resolve in the fully-qualified form.
         for a in scan_adrs(sroot, s_adr_dir, s_namespace):
             adr_index.setdefault(a.id, a)
         spec_index[src.id] = _spec_ids(sroot, s_specs_dir)
+    # disabled check ⇒ the pin file is "simply ignored" (spec edge case) — no recovery either
+    if cfg.checks.citations_fresh:
+        _recover_unreadable_pinned_adrs(cfg, repo_root, adr_index)
     return this_adrs, adr_index, spec_index
 
 
-def _resolve_spec(value: str, spec_index: dict[str, set[str]]) -> bool:
+def _resolve_spec(value: str, spec_index) -> bool:
+    """Membership over the spec index (source id → feature ids; values may be the
+    id→path mapping build_indexes produces or a plain id set — `in` works on both)."""
     sid, spec = value.split(":", 1) if ":" in value else ("", value)
-    return spec.strip() in spec_index.get(sid.strip(), set())
+    return spec.strip() in spec_index.get(sid.strip(), ())
 
 
 # ──────────────────────────── checks ────────────────────────────
@@ -279,6 +338,66 @@ def check_governance_adopted(repo_root, adr_dir, governance_adr) -> list[Issue]:
     return []
 
 
+def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_index, spec_index) -> list[Issue]:
+    """The sixth check (slice 006): pinned citations still match the cited artifact's
+    current content state. Strictly read-only — it NEVER writes pins (FR-011).
+
+    Severity ladder (D5): only a *determinate* mismatch on an *existing* pin is a
+    failure. Unpinned → nudge note (FR-006); orphaned pin → prunable note (FR-007);
+    cannot-evaluate → indeterminate note (FR-008). A citation already failing
+    `citations_resolve` stays silent here — the resolve failure owns its story (FR-009);
+    if that check is disabled, nobody owns it, so it degrades to an indeterminate note.
+    """
+    out: list[Issue] = []
+    try:
+        pins = P.load_pins(repo_root)
+    except P.PinLoadError as exc:
+        out.append(Issue("citations_fresh",
+                         f"pin file {P.PIN_FILE} could not be parsed ({exc}) — "
+                         f"treating all citations as unpinned for this run",
+                         P.PIN_FILE, severity="note"))
+        pins = {}
+    keys_seen: set[P.PinKey] = set()
+    for c in cits:
+        # pin identity keys on the RAW slot value (as authored) + POSIX-normalized citing
+        # path; the qualified c.value is used for RESOLUTION only (FR-003).
+        k = P.pin_key(c.source, c.relation, c.raw)
+        if k in keys_seen:
+            continue  # duplicate slot entry — one verdict per pin key
+        keys_seen.add(k)
+        resolves = (c.value in adr_index) if c.relation == "cites" else _resolve_spec(c.value, spec_index)
+        if not resolves:
+            if not cfg.checks.citations_resolve:
+                out.append(Issue("citations_fresh",
+                                 f"{c.relation} {c.raw!r}: freshness indeterminate — the citation does "
+                                 f"not resolve (and citations_resolve is disabled)",
+                                 c.source, severity="note"))
+            continue  # FR-009: the citations_resolve failure owns this citation's story
+        pin = pins.get(k)
+        if pin is None:
+            out.append(Issue("citations_fresh",
+                             f"{c.relation} {c.raw!r} is unpinned — run `repin --apply` to start "
+                             f"freshness tracking", c.source, severity="note"))
+            continue
+        t = P.resolve_target(cfg, repo_root, c.relation, c.value, adr_index, spec_index)
+        if t.status != "ok":
+            out.append(Issue("citations_fresh",
+                             f"{c.relation} {c.raw!r}: freshness indeterminate — {t.reason}",
+                             c.source, severity="note"))
+        elif t.digest != pin.digest:
+            out.append(Issue("citations_fresh",
+                             f"{c.relation} {c.raw!r} is STALE — {t.display} changed since it was "
+                             f"pinned (pinned {P.abbrev(pin.digest)}, current {P.abbrev(t.digest)}); "
+                             f"review the upstream change, then `repin`", c.source))
+    for k in sorted(pins):
+        if k not in keys_seen:
+            pin = pins[k]
+            out.append(Issue("citations_fresh",
+                             f"orphaned pin: {pin.relation} {pin.value!r} is no longer cited — "
+                             f"prunable via `repin`", pin.citing, severity="note"))
+    return out
+
+
 def coverage_report(cfg: GovernanceConfig, repo_root: Path) -> list[Issue]:
     """Advisory: feature specs whose `derived_from` AND `cites` slots are both empty/absent.
 
@@ -316,6 +435,7 @@ def validate(cfg: GovernanceConfig, repo_root: Path):
         "citations_current": lambda: check_citations_current(cits, adr_index),
         "adr_immutability": lambda: check_adr_immutability(this_adrs, repo_root),
         "governance_adopted": lambda: check_governance_adopted(repo_root, cfg.adr_dir, cfg.governance_adr),
+        "citations_fresh": lambda: check_citations_fresh(cfg, repo_root, cits, adr_index, spec_index),
     }
     issues: list[Issue] = []
     for name, fn in runners.items():

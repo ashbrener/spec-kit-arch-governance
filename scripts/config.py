@@ -36,6 +36,9 @@ class Checks(BaseModel):
     namespace_valid: bool = True
     adr_immutability: bool = True
     governance_adopted: bool = True
+    # Slice 006 — default-enabled yet self-gating: unpinned citations only ever produce
+    # notes, so the check bites only where the operator opted in by pinning (US3/D5).
+    citations_fresh: bool = True
 
 
 class GovernanceConfig(BaseModel):
