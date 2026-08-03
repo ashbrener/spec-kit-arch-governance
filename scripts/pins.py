@@ -118,6 +118,14 @@ def _validate_record(p: Pin) -> None:
     if not _DATE_RE.match(p.pinned):
         raise PinLoadError(f"pin for {p.value!r} has a missing/invalid 'pinned' date "
                            f"{p.pinned!r} (want YYYY-MM-DD)")
+    try:
+        # shape is not enough: 2026-99-99 / 2026-02-31 match the regex but are not
+        # calendar dates — accepted, an up-to-date --apply would preserve the bogus
+        # audit date verbatim forever. Parse as a real ISO calendar date.
+        _dt.date.fromisoformat(p.pinned)
+    except ValueError:
+        raise PinLoadError(f"pin for {p.value!r} has a non-calendar 'pinned' date "
+                           f"{p.pinned!r}") from None
 
 
 def digest_path(p: Path) -> str:
@@ -147,6 +155,15 @@ def load_pins(repo_root) -> dict[PinKey, Pin]:
             # the writer never emits one, so its emptiness is corruption, not adoption.
             raise PinLoadError("pin file is empty — expected a pins document "
                                "(truncated or merge-damaged?)")
+        if not isinstance(data, dict):
+            raise PinLoadError(f"pin file top level must be a mapping, "
+                               f"got {type(data).__name__} (merge-damaged?)")
+        version = data.get("version")
+        if version != "v1":
+            # an UNKNOWN format must never be interpreted as the current one — reading
+            # v2 (or version-less) records with v1 semantics could fabricate determinate
+            # stale failures that halt a blocking repo.
+            raise PinLoadError(f"unsupported pin file version {version!r} (want 'v1')")
         pins = []
         for e in data["pins"]:
             if not isinstance(e, dict):

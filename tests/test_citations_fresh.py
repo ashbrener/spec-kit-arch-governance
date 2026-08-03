@@ -432,6 +432,72 @@ def test_non_scalar_pin_fields_are_malformed_and_selector_refused(tmp_path):
         assert (build / P.PIN_FILE).read_text() == body, name         # nothing written
 
 
+def test_unknown_pin_file_format_is_malformed(tmp_path):
+    """The sidecar must declare `version: v1` at a mapping top level before any record
+    is read. A missing version, an unsupported one (v2), or a non-mapping top level is
+    an UNKNOWN format — interpreting it with v1 semantics could fabricate determinate
+    stale failures that halt a blocking repo. All three route to the malformed path."""
+    cases = {
+        "missing-version": "pins: []\n",
+        "unsupported-version": "version: v2\npins: []\n",
+        "non-mapping-top-level": "- not\n- a\n- mapping\n",
+    }
+    for name, body in cases.items():
+        _, build = _domain(tmp_path / name)
+        (build / P.PIN_FILE).write_text(body)
+        try:
+            P.load_pins(build)
+            assert False, f"{name}: an unknown format must raise PinLoadError"
+        except P.PinLoadError:
+            pass
+        cfg, root, issues = _validate(build)
+        notes = _fresh(issues)
+        malformed = [i for i in notes if P.PIN_FILE in i.detail]
+        assert len(malformed) == 1 and malformed[0].severity == "note", name
+        assert sum("is unpinned" in i.detail for i in notes) == 2, name
+        assert _fresh_fails(issues) == [], name
+        blocking = cfg.model_copy(update={"mode": "blocking"})
+        assert G.gate_decision(blocking, root).decision == "proceed", name
+
+
+def test_non_calendar_pinned_dates_are_malformed(tmp_path):
+    """The pinned audit date must be a REAL ISO calendar date: 2026-99-99 and 2026-02-31
+    match the YYYY-MM-DD shape but are not dates — accepted, an up-to-date --apply would
+    preserve the bogus audit value verbatim forever. Valid dates (quoted or the round-5
+    unquoted-YAML-date tolerance) still round-trip."""
+    good_digest = "sha256:" + "a" * 64
+    record = ("version: v1\npins:\n"
+              "- citing: specs/001-derived/spec.md\n"
+              "  relation: derived_from\n  value: docs:005-fund-model\n"
+              "  path: ../docs/specs/005-fund-model/spec.md\n"
+              f"  digest: {good_digest}\n"
+              "  pinned: '{date}'\n")
+    for bad in ("2026-99-99", "2026-02-31"):
+        _, build = _domain(tmp_path / bad.replace("-", "_"))
+        (build / P.PIN_FILE).write_text(record.format(date=bad))
+        try:
+            P.load_pins(build)
+            assert False, f"{bad}: a non-calendar date must raise PinLoadError"
+        except P.PinLoadError:
+            pass
+        _, _, issues = _validate(build)
+        malformed = [n for n in _fresh(issues) if P.PIN_FILE in n.detail]
+        assert len(malformed) == 1 and malformed[0].severity == "note", bad
+        assert _fresh_fails(issues) == [], bad
+    # a valid calendar date still round-trips…
+    _, build = _domain(tmp_path / "good")
+    _pin(build)
+    loaded = P.load_pins(build)
+    assert loaded and all(p.pinned for p in loaded.values())
+    # …including the round-5 tolerance: an UNQUOTED date YAML parses as datetime.date
+    d = next(iter(loaded.values())).pinned
+    f = build / P.PIN_FILE
+    f.write_text(f.read_text().replace(f"pinned: '{d}'", f"pinned: {d}"))
+    reloaded = P.load_pins(build)
+    assert len(reloaded) == len(loaded)
+    assert all(p.pinned == d for p in reloaded.values())   # normalized back to ISO form
+
+
 # ── US4: enforcement + fail-safe ──
 
 def test_blocking_gate_halts_on_determinate_stale_and_clears_after_repin(tmp_path):

@@ -25,10 +25,15 @@ maintainers*, not as an interop promise.
   fields would read as fresh/up-to-date forever and the damage would never surface or be
   repaired. Also malformed: a NON-SCALAR field value (a list/mapping where a string belongs —
   merge damage; str()-coercion would fabricate passing strings that surface as misleading
-  unpinned/orphan outcomes), and DUPLICATE pin identities (two records with the same key — a
+  unpinned/orphan outcomes), DUPLICATE pin identities (two records with the same key — a
   classic merge outcome; silent last-wins could report fresh off the surviving duplicate while
-  an all-up-to-date `--apply` never repairs the ambiguity). One tolerance: an unquoted `pinned`
-  that YAML parses as a date is normalized back to `YYYY-MM-DD`, not rejected.
+  an all-up-to-date `--apply` never repairs the ambiguity), an UNKNOWN top-level format (the
+  file must be a mapping declaring `version: v1` before any record is read — a missing or
+  unsupported version interpreted with v1 semantics could fabricate determinate stale
+  failures), and a NON-CALENDAR `pinned` date (shape-valid values like `2026-02-31` are parsed
+  as real ISO dates, not just pattern-matched — a bogus audit date would otherwise be preserved
+  verbatim by every up-to-date `--apply`). One tolerance: an unquoted `pinned` that YAML parses
+  as a date is normalized back to `YYYY-MM-DD`, not rejected.
 
 ## Shape
 
