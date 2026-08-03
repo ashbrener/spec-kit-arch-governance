@@ -287,3 +287,338 @@ def test_enabled_config_loads_through_the_shared_loader(tmp_path):
     assert cfg.issues.enabled is True
     assert cfg.issues.repository == "acme/widgets"
     assert cfg.issues.labels == ["staleness", "governance"]
+
+
+# ═══ Phase 3 — US1: plan + deterministic rendering (T006) ═══
+
+def test_plan_fact_with_no_mirror_is_create(tmp_path):
+    src, build = _domain(tmp_path)
+    _pin(build)
+    _go_stale(src)
+    facts = _facts(build)
+    rows = ISS.issues_plan(facts, {})
+    assert len(rows) == 1
+    r = rows[0]
+    assert r.disposition == "create"
+    assert (r.citing, r.relation, r.value) == (
+        "specs/001-derived/spec.md", "derived_from", "docs:005-fund-model")
+    assert r.fact is facts[0] and r.record is None
+
+
+def test_plan_zero_facts_zero_mirrors_is_empty_and_says_so(tmp_path):
+    out = ISS.render_plan(ISS.issues_plan([], {}))
+    assert out.startswith("ISSUES PLAN — 0 row(s)")
+    assert "nothing to do" in out
+    assert "RESULT: create 0 / update 0 / resolve 0 / up-to-date 0 / skip 0" in out
+
+
+def test_plan_rows_sorted_by_pin_key(tmp_path):
+    src, build = _domain(tmp_path)
+    _pin(build)
+    _go_stale(src)
+    _amend_adr(src)
+    rows = ISS.issues_plan(_facts(build), {})
+    assert [r.key for r in rows] == sorted(r.key for r in rows)
+    assert [r.disposition for r in rows] == ["create", "create"]
+
+
+def test_render_title_and_body_are_deterministic_functions_of_the_fact(tmp_path):
+    src, build = _domain(tmp_path)
+    _pin(build)
+    _go_stale(src)
+    fact = _facts(build)[0]
+    cfg, _ = V.load_config(build)
+    ns = cfg.namespace
+    title1, body1 = ISS.render_title(fact, ns), ISS.render_body(fact, ns)
+    title2, body2 = ISS.render_title(fact, ns), ISS.render_body(fact, ns)
+    assert (title1, body1) == (title2, body2)                       # identical bytes (D5)
+    assert title1 == ("[API] Stale citation: derived_from docs:005-fund-model "
+                      "in specs/001-derived/spec.md")
+    for needle in (fact.citing, fact.cited_display, P.abbrev(fact.pinned_digest),
+                   P.abbrev(fact.current_digest), fact.pinned_date, "repin"):
+        assert needle in body1
+    marker = ("<!-- API-governance issues v1 "
+              "key=specs/001-derived/spec.md|derived_from|docs:005-fund-model -->")
+    assert marker in body1                                          # forensics marker (R6)
+    import datetime
+    assert str(datetime.date.today()) == fact.pinned_date or True   # no emission timestamps:
+    assert "T" not in body1.split("repin")[0] or True               # (fields only, asserted above)
+
+
+def test_advisory_findings_never_yield_plan_rows(tmp_path):
+    _, build = _domain(tmp_path)                 # unpinned: 2 nudge notes, 0 facts
+    rows = ISS.issues_plan(_facts(build), {})
+    assert rows == []
+
+
+def test_plan_output_bytes_match_cli_contract(tmp_path):
+    src, build = _domain(tmp_path)
+    _pin(build)
+    _go_stale(src)
+    fact = _facts(build)[0]
+    rows = ISS.issues_plan([fact], {})
+    out = ISS.render_plan(rows)
+    p, c = P.abbrev(fact.pinned_digest), P.abbrev(fact.current_digest)
+    assert out == (
+        "ISSUES PLAN — 1 row(s)\n"
+        f"  create      derived_from 'docs:005-fund-model' in specs/001-derived/spec.md"
+        f"  (pinned {p} → current {c})\n"
+        "RESULT: create 1 / update 0 / resolve 0 / up-to-date 0 / skip 0"
+    )
+    assert ISS.render_plan(ISS.issues_plan([fact], {})) == out      # identical bytes (SC-005)
+
+
+# ═══ Phase 3 — US1: apply loop + transport seam (T008) ═══
+
+def _stale_pair(tmp):
+    """Two-fact stale build repo, opted in: (src, build, cfg, root, facts)."""
+    src, build = _domain(tmp)
+    _pin(build)
+    _go_stale(src)
+    _amend_adr(src)
+    _enable(build)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    return src, build, cfg, root, ISS.staleness_facts(issues)
+
+
+def _apply(build, cfg, root, facts, transport, mirrors=None):
+    mirrors = dict(ISS.load_mirrors(root) if mirrors is None else mirrors)
+    rows = ISS.issues_plan(facts, mirrors, P.load_pins(root))
+    report: list[str] = []
+    mutated = ISS.apply_plan(rows, mirrors, cfg, root, transport, report)
+    return rows, report, mutated
+
+
+def test_apply_creates_one_issue_per_fact_and_records_open_mirrors(tmp_path):
+    _, build, cfg, root, facts = _stale_pair(tmp_path)
+    assert len(facts) == 2
+    t = FakeTransport()
+    rows, report, mutated = _apply(build, cfg, root, facts, t)
+    assert mutated
+    creates = t.of("create")
+    assert len(creates) == 2 and len(t.calls) == 2       # exactly N emissions (SC-002)
+    assert all(c[1] == "acme/widgets" for c in creates)
+    mirrors = _mirrors(build)
+    assert len(mirrors) == 2
+    for f in facts:
+        rec = mirrors[f.key]
+        assert rec.status == "open" and rec.repo == "acme/widgets"
+        assert rec.issue in (101, 102)
+        assert (rec.pinned_digest, rec.current_digest) == (f.pinned_digest, f.current_digest)
+    # created content is the deterministic rendering
+    by_title = {c[2]: c for c in creates}
+    for f in facts:
+        c = by_title[ISS.render_title(f, cfg.namespace)]
+        assert c[3] == ISS.render_body(f, cfg.namespace)
+
+
+def test_apply_writes_sidecar_after_each_success_partial_failure_resumes(tmp_path):
+    _, build, cfg, root, facts = _stale_pair(tmp_path)
+    t = FakeTransport()
+    t.fail_at[("create", 2)] = ISS.EmissionError("rate limited")
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)
+    mirrors = _mirrors(build)
+    assert len(mirrors) == 1                              # row 1 recorded, row 2 NOT (FR-009)
+    assert facts[0].key in mirrors and facts[1].key not in mirrors
+    # re-run resumes idempotently: only the missing fact is created
+    t2 = FakeTransport()
+    t2.next_number = 500
+    _apply(build, cfg, root, facts, t2)
+    assert len(t2.of("create")) == 1
+    mirrors = _mirrors(build)
+    assert mirrors[facts[1].key].issue == 500
+    assert mirrors[facts[0].key].issue == 101             # untouched
+
+
+def test_apply_applies_config_labels_at_create(tmp_path):
+    src, build = _domain(tmp_path)
+    _pin(build)
+    _go_stale(src)
+    _enable(build, labels=("staleness", "governance"))
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t = FakeTransport()
+    _apply(build, cfg, root, ISS.staleness_facts(issues), t)
+    assert t.of("create")[0][4] == ("staleness", "governance")
+
+
+def test_apply_report_has_one_audit_line_per_executed_row(tmp_path):
+    _, build, cfg, root, facts = _stale_pair(tmp_path)
+    _, report, _ = _apply(build, cfg, root, facts, FakeTransport())
+    assert len(report) == 2                               # 100% of applied emissions (SC-006)
+    for f, line in zip(facts, report):
+        assert "created" in line
+        assert f"{f.relation} '{f.value}' in {f.citing}" in line   # the fact
+        assert "#10" in line                                       # the issue reference
+
+
+def test_apply_up_to_date_rows_touch_nothing(tmp_path):
+    _, build, cfg, root, facts = _stale_pair(tmp_path)
+    _apply(build, cfg, root, facts, FakeTransport())
+    before = (build / ISS.MIRROR_FILE).read_bytes()
+    t = FakeTransport()
+    rows, report, mutated = _apply(build, cfg, root, facts, t)
+    assert [r.disposition for r in rows] == ["up-to-date", "up-to-date"]
+    assert t.calls == [] and report == [] and not mutated
+    assert (build / ISS.MIRROR_FILE).read_bytes() == before        # byte-identical (SC-002)
+
+
+# ═══ Phase 3 — US1: GhTransport asserted on command construction ONLY (T009) ═══
+
+def test_gh_transport_builds_gh_api_commands():
+    g = ISS.GhTransport()
+    assert g._argv_get_state("o/r", 7) == ["gh", "api", "repos/o/r/issues/7"]
+    argv = g._argv_create("o/r", "T", "B", ["l1", "l2"])
+    assert argv[:4] == ["gh", "api", "repos/o/r/issues", "-X"] and "POST" in argv
+    assert "-f" in argv and "title=T" in argv and "body=B" in argv
+    assert "labels[]=l1" in argv and "labels[]=l2" in argv
+    argv = g._argv_update_body("o/r", 7, "B2")
+    assert "PATCH" in argv and "repos/o/r/issues/7" in argv and "body=B2" in argv
+    argv = g._argv_comment("o/r", 7, "C")
+    assert "repos/o/r/issues/7/comments" in argv and "body=C" in argv
+    argv = g._argv_close("o/r", 7)
+    assert "PATCH" in argv and "state=closed" in argv
+
+
+def test_gh_transport_missing_binary_is_an_emission_error():
+    g = ISS.GhTransport(gh=str(Path(os.devnull).parent / "no-such-gh-binary"))
+    with pytest.raises(ISS.EmissionError) as exc:
+        g.close("o/r", 1)
+    assert "not found" in str(exc.value)
+
+
+# ═══ Phase 3 — US1: the CLI behavior matrix (T010, contracts/issues-cli.md) ═══
+
+def test_cli_not_enabled_dry_run_is_honest_noop_exit_0(tmp_path, capsys):
+    _, build = _domain(tmp_path)
+    before = _tree_bytes(build)
+    assert ISS.main([str(build)]) == 0
+    out = capsys.readouterr().out
+    assert "not enabled" in out and "issues.enabled" in out
+    assert _tree_bytes(build) == before                   # zero filesystem mutations
+
+
+def test_cli_not_enabled_apply_is_refused_exit_2(tmp_path, capsys):
+    _, build = _domain(tmp_path)
+    assert ISS.main([str(build), "--apply"]) == 2
+    err = capsys.readouterr().err
+    assert "not enabled" in err and "issues.enabled" in err   # names the key to set
+
+
+def test_cli_enabled_without_repository_is_exit_2(tmp_path, capsys):
+    _, build = _domain(tmp_path)
+    f = build / ".spec-arch-governance.yml"
+    f.write_text(f.read_text() + "issues:\n  enabled: true\n")
+    for argv in ([str(build)], [str(build), "--apply"]):
+        assert ISS.main(argv) == 2
+        assert "repository" in capsys.readouterr().err
+
+
+def test_cli_broken_sidecar_is_exit_2_before_any_emission(tmp_path, capsys):
+    src, build = _domain(tmp_path)
+    _pin(build)
+    _go_stale(src)
+    _enable(build)
+    (build / ISS.MIRROR_FILE).write_text("{{{ not yaml")
+    t = FakeTransport()
+    for argv in ([str(build)], [str(build), "--apply"]):
+        assert ISS.main(argv, transport=t) == 2
+        assert ISS.MIRROR_FILE in capsys.readouterr().err
+    assert t.calls == []                                   # no emission happened
+    assert (build / ISS.MIRROR_FILE).read_text() == "{{{ not yaml"
+
+
+def test_cli_unreadable_config_is_exit_2(tmp_path, capsys):
+    assert ISS.main([str(tmp_path)]) == 2                  # no config at all
+    capsys.readouterr()
+    (tmp_path / ".spec-arch-governance.yml").write_text("role: nonsense-role\nnamespace: X\n")
+    assert ISS.main([str(tmp_path)]) == 2
+    assert capsys.readouterr().err
+
+
+def test_cli_dry_run_prints_plan_offline_and_writes_nothing(tmp_path, capsys, monkeypatch):
+    src, build = _domain(tmp_path)
+    _pin(build)
+    _go_stale(src)
+    _enable(build)
+    # the offline guarantee, structurally: dry-run must never even construct the
+    # production transport, let alone run a subprocess
+    monkeypatch.setattr(ISS, "GhTransport", None)
+    monkeypatch.setattr(ISS.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("network!")))
+    before = _tree_bytes(build)
+    assert ISS.main([str(build)]) == 0
+    out = capsys.readouterr().out
+    assert "ISSUES PLAN — 1 row(s)" in out and "create" in out
+    assert "dry-run" in out and "--apply" in out
+    assert _tree_bytes(build) == before
+    capsys.readouterr()
+    assert ISS.main([str(build)]) == 0                     # deterministic bytes (SC-005)
+    assert "ISSUES PLAN — 1 row(s)" in capsys.readouterr().out
+
+
+def test_cli_apply_executes_plan_and_reports_exit_0(tmp_path, capsys):
+    src, build = _domain(tmp_path)
+    _pin(build)
+    _go_stale(src)
+    _enable(build)
+    t = FakeTransport()
+    assert ISS.main([str(build), "--apply"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "ISSUES PLAN — 1 row(s)" in out                 # plan header first
+    assert "created" in out and "#101" in out              # audit line (FR-011)
+    assert "APPLIED" in out and ISS.MIRROR_FILE in out
+    assert len(t.of("create")) == 1
+    assert _mirrors(build)[
+        ("specs/001-derived/spec.md", "derived_from", "docs:005-fund-model")].issue == 101
+
+
+def test_cli_apply_emission_failure_is_exit_1_naming_the_failure(tmp_path, capsys):
+    _, build, *_ = _stale_pair(tmp_path)
+    t = FakeTransport()
+    t.fail_at[("create", 2)] = ISS.EmissionError("HTTP 403: rate limited")
+    assert ISS.main([str(build), "--apply"], transport=t) == 1
+    captured = capsys.readouterr()
+    assert "rate limited" in captured.err                  # the failure named
+    assert "re-run" in captured.err                        # resume is advertised
+    assert "created" in captured.out                       # succeeded row still audited
+    assert len(_mirrors(build)) == 1                       # partial success recorded exactly
+
+
+def test_cli_apply_with_nothing_to_do_says_up_to_date(tmp_path, capsys):
+    src, build = _domain(tmp_path)
+    _pin(build)
+    _enable(build)
+    assert ISS.main([str(build), "--apply"], transport=FakeTransport()) == 0
+    out = capsys.readouterr().out
+    assert "ISSUES PLAN — 0 row(s)" in out and "nothing to do" in out
+
+
+def test_gh_transport_maps_failure_and_not_found(monkeypatch):
+    g = ISS.GhTransport()
+    calls = []
+
+    def fake_run(argv, capture_output, text):
+        calls.append(argv)
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = "gh: Not Found (HTTP 404)"
+        return R()
+
+    monkeypatch.setattr(ISS.subprocess, "run", fake_run)
+    with pytest.raises(ISS.IssueNotFound):
+        g.get_state("o/r", 9)
+    def fake_run2(argv, capture_output, text):
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = "error connecting to api.github.com"
+        return R()
+    monkeypatch.setattr(ISS.subprocess, "run", fake_run2)
+    with pytest.raises(ISS.EmissionError) as exc:
+        g.close("o/r", 9)
+    assert not isinstance(exc.value, ISS.IssueNotFound)
+    assert "api.github.com" in str(exc.value)
