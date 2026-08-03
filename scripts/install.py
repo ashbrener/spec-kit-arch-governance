@@ -22,6 +22,7 @@ is touched.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shlex
 import sys
@@ -206,8 +207,60 @@ def guard_blocking_transition(cfg: GovernanceConfig, repo_root: Path) -> None:
         )
 
 
+class UnsafeOutputPath(SystemExit):
+    """Typed refusal (symlink hardening): an install output path is — or traverses — a
+    symlink. A repository-controlled link at an output location would let `mkdir` /
+    `write_text` follow it and write OUTSIDE the governed repository. Subclasses
+    SystemExit so the CLI exits cleanly with the message; typed so tests and callers
+    can catch it specifically."""
+
+
+def ensure_regular_output(repo_root: Path, path: Path, what: str) -> None:
+    """Refuse any install write whose target — or any path component below the repo
+    root — is a symlink, dangling or resolving. A dangling link defeats every
+    `exists()` guard (exists() is False, yet write_text follows the link); a resolving
+    link silently redirects the write. Checks are LEXICAL (no resolve()): resolving
+    would follow the very links that must be refused. Every intermediate component must
+    be a regular directory or absent; the final path a regular file or absent."""
+    repo_root = Path(repo_root)
+    path = Path(path)
+    try:
+        rel = path.relative_to(repo_root)
+    except ValueError:
+        raise UnsafeOutputPath(
+            f"install: refusing to write {what} at {path} — it is not inside the "
+            f"governed repository ({repo_root})."
+        ) from None
+    # relative_to is lexical and does NOT normalize: '<repo>/../elsewhere' passes the
+    # prefix check with a literal '..' part. Any dot segment escapes (or re-enters via
+    # an unvalidated route) — refuse.
+    if any(part in ("..", ".") for part in rel.parts):
+        raise UnsafeOutputPath(
+            f"install: refusing to write {what} at {path} — the configured path "
+            f"traverses '..'/'.' segments and may escape the governed repository "
+            f"({repo_root}).")
+    cur = repo_root
+    for part in rel.parts:
+        cur = cur / part
+        if cur.is_symlink():
+            try:
+                target = os.readlink(cur)
+            except OSError:
+                target = "<unreadable link target>"
+            kind = "file" if cur == path else "directory"
+            raise UnsafeOutputPath(
+                f"install: refusing to write {what} — {cur} is a symlink (-> {target}). "
+                f"Symlinked output paths can redirect installer writes outside the "
+                f"governed repository; replace the symlink with a regular {kind} "
+                f"(or point the configured path at one), then re-run install.")
+        if cur != path and os.path.lexists(cur) and not cur.is_dir():
+            raise UnsafeOutputPath(
+                f"install: refusing to write {what} — {cur} exists and is not a directory.")
+
+
 def write_config(cfg: GovernanceConfig, repo_root: Path, force: bool = False) -> Path:
     path = repo_root / CONFIG_NAME
+    ensure_regular_output(repo_root, path, f"the governance config ({CONFIG_NAME})")
     if path.exists() and not force:
         raise SystemExit(f"install: {CONFIG_NAME} already exists (use --force to overwrite).")
     path.write_text(config_to_yaml(cfg), encoding="utf-8")
@@ -247,13 +300,19 @@ def scaffold_governance(answers: InstallAnswers, repo_root: Path) -> list[Path]:
     if not answers.scaffold_governance:
         return []
     adr = repo_root / answers.adr_dir
+    rule = adr / f"{answers.namespace}-ADR-000-governance.md"
+    readme = adr / "README.md"
+    # Symlink hardening: validate ALL scaffold targets before the first write — the
+    # adr_dir chain (mkdir follows symlinked dirs) and both files (a dangling link
+    # passes the `not exists()` guards below yet write_text writes through it).
+    ensure_regular_output(repo_root, adr, f"the ADR scaffold directory ({answers.adr_dir})")
+    ensure_regular_output(repo_root, rule, f"the governance ADR ({rule.name})")
+    ensure_regular_output(repo_root, readme, "the ADR README")
     adr.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
-    rule = adr / f"{answers.namespace}-ADR-000-governance.md"
     if not rule.exists():
         rule.write_text(_ADR000.format(ns=answers.namespace), encoding="utf-8")
         written.append(rule)
-    readme = adr / "README.md"
     if not readme.exists():
         readme.write_text(_ADR_README.format(ns=answers.namespace,
                                              gov=answers.governance_adr or f"{answers.namespace}-ADR-000"),
@@ -315,9 +374,19 @@ def main(argv=None) -> int:
     for f in scaffolded:
         print(f"install: scaffolded {f.relative_to(repo_root)}")
     if not args.no_templates:
+        # Symlink hardening: the splice REWRITES the template files — a symlinked
+        # template (or a symlinked .specify/templates component) would redirect that
+        # write outside the repo. Validate both targets (and their dir chain) first.
+        for name in (T.SPEC_TEMPLATE, T.PLAN_TEMPLATE):
+            ensure_regular_output(repo_root, repo_root / T.TEMPLATES_SUBDIR / name,
+                                  f"the SpecKit template ({T.TEMPLATES_SUBDIR}/{name})")
         for f in T.patch_templates(repo_root, cfg.citation_keys):
             print(f"install: born-compliant — added citation slot to {f.relative_to(repo_root)}")
     if args.seed:
+        # Symlink hardening: seed_manifest's own exists() refusal is blind to a
+        # DANGLING link at the registry path — validate before any write.
+        ensure_regular_output(repo_root, repo_root / D.DOMAIN_NAME,
+                              f"the domain manifest ({D.DOMAIN_NAME}, --seed)")
         siblings = D.detect_siblings(repo_root)
         # the authority of a multi-repo set is a `source` by definition (others build against it)
         self_role = "source" if siblings else cfg.role
