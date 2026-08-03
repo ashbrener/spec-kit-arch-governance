@@ -153,6 +153,28 @@ def test_malformed_pin_file_is_warned_and_rebuilt_on_apply(tmp_path, capsys):
     assert len(_pins(build)) == 2                            # rebuilt from the citation set
 
 
+def test_malformed_pin_file_with_zero_citations_is_still_rebuilt_on_apply(tmp_path, capsys):
+    """The rebuild must be apply-worthy even when the rebuilt pin list is EMPTY — an
+    empty-but-valid pin file IS the rebuild. Otherwise --apply skips the write and
+    validation stays stuck on the malformed-file warning forever."""
+    repo = tmp_path / "app"
+    repo.mkdir()
+    (repo / ".spec-arch-governance.yml").write_text(
+        "version: v1\nrole: standalone\nnamespace: APP\nmode: advisory\n"
+        "adr_dir: docs/adr\nspecs_dir: specs\nsources: []\n" + BUILD_CHECKS)
+    (repo / P.PIN_FILE).write_text("{{{ not yaml")
+    assert R.main([str(repo)]) == 0                          # dry-run: plans the rebuild
+    out = capsys.readouterr().out
+    assert "malformed" in out and "--apply" in out           # apply-worthy, not "nothing to write"
+    assert "nothing to write" not in out
+    assert (repo / P.PIN_FILE).read_text() == "{{{ not yaml"  # dry-run leaves it alone
+    assert R.main([str(repo), "--apply"]) == 0
+    assert P.load_pins(repo) == {}                           # rebuilt: valid and empty
+    cfg, root = V.load_config(repo)
+    issues, _ = V.validate(cfg, root)
+    assert _fresh(issues) == []                              # unstuck — no malformed note left
+
+
 # ── install: the nudge, never the write (OQ-4) ──
 
 def test_install_prints_repin_nudge_and_never_writes_pins(tmp_path, capsys):
@@ -164,6 +186,24 @@ def test_install_prints_repin_nudge_and_never_writes_pins(tmp_path, capsys):
     assert "repin" in out and "--apply" in out               # the exact command is printed
     assert "never writes pins" in out
     assert not (tmp_path / P.PIN_FILE).exists()              # install wrote no pins
+
+
+def test_install_nudge_is_shell_quoted_for_paths_with_spaces(tmp_path, capsys):
+    """The printed 'exact repin command' must stay copy-pasteable when the governed
+    path contains spaces/shell metacharacters (both arguments are quoted)."""
+    import shlex
+    repo = tmp_path / "my governed repo"
+    (repo / "specs" / "001-x").mkdir(parents=True)
+    (repo / "specs" / "001-x" / "spec.md").write_text("---\nderived_from: []\n---\n# s\n")
+    (repo / "specs" / "001-x" / "plan.md").write_text("---\ncites: []\n---\n# p\n")
+    assert I.main([str(repo), "--non-interactive"]) == 0
+    out = capsys.readouterr().out
+    line = next(ln for ln in out.splitlines() if "--apply" in ln)
+    toks = shlex.split(line.split("run:", 1)[1])             # the command parses cleanly
+    assert toks[:3] == ["uv", "run", "python"]
+    assert toks[3].endswith("repin.py")                      # script path: one token
+    assert toks[4] == str(repo.resolve())                    # spaced repo path: ONE token
+    assert toks[5] == "--apply"
 
 
 # ── the blocking-flip guard accounts for the sixth check (FR-014) ──

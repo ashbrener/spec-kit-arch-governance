@@ -52,10 +52,18 @@ class RepinPlan:
     entries: list[PlanEntry] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     keep: list[P.Pin] = field(default_factory=list)   # untouched pins, carried verbatim
+    rebuild: bool = False    # pin file malformed → --apply must rewrite it even if the
+                             # rebuilt pin list is empty (an empty-but-valid file IS the
+                             # rebuild; otherwise validation stays stuck on the warning)
 
     @property
     def changes(self) -> list[PlanEntry]:
         return [e for e in self.entries if e.action in ("create", "refresh", "prune")]
+
+    @property
+    def writes(self) -> bool:
+        """Whether --apply has anything to do — entry changes OR a malformed-file rebuild."""
+        return bool(self.changes) or self.rebuild
 
     def result_pins(self) -> list[P.Pin]:
         return self.keep + [e.new_pin for e in self.entries if e.new_pin is not None]
@@ -85,6 +93,7 @@ def repin_plan(cfg, repo_root: Path, selector: Optional[str] = None,
     except P.PinLoadError as exc:
         plan.notes.append(f"pin file {P.PIN_FILE} is malformed ({exc}) — --apply will rebuild it "
                           f"from the current citation set")
+        plan.rebuild = True   # apply-worthy even when the rebuilt pin list is empty
         pins = {}
     seen: set[P.PinKey] = set()
     for c in cits:
@@ -137,7 +146,7 @@ def render(plan: RepinPlan, applied: bool) -> str:
     lines = [f"repin · {summary}"]
     lines += [f"  note: {n}" for n in plan.notes]
     lines += [e.render() for e in plan.entries]
-    if not plan.changes:
+    if not plan.writes:
         lines.append("  pins are up to date — nothing to write.")
     elif applied:
         lines.append(f"  APPLIED — wrote {P.PIN_FILE} (this repo only).")
@@ -158,7 +167,7 @@ def main(argv=None) -> int:
 
     cfg, repo_root = V.load_config(args.repo)
     plan = repin_plan(cfg, repo_root, args.selector)
-    applied = bool(args.apply and plan.changes)
+    applied = bool(args.apply and plan.writes)
     if applied:
         (repo_root / P.PIN_FILE).write_text(P.pins_to_yaml(plan.result_pins()), encoding="utf-8")
     print(render(plan, applied=applied))

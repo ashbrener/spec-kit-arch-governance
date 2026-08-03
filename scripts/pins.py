@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -32,6 +33,13 @@ CONFIG_NAMES = (".spec-arch-governance.yml", ".spec-arch-governance.yaml")
 
 # (citing artifact relpath, relation, citation value exactly as written) — FR-003.
 PinKey = tuple[str, str, str]
+
+# The only digest shape a pin may carry. Anything else (null, a truncated hash,
+# merge-conflict residue) is a MALFORMED file — never a comparable pin, because a
+# garbage digest would otherwise compare unequal and masquerade as a DETERMINATE
+# stale failure (which can halt a blocking repo). Malformed routes to the fail-safe
+# indeterminate-note path instead (FR-008).
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _posix(s) -> str:
@@ -102,6 +110,12 @@ def load_pins(repo_root) -> dict[PinKey, Pin]:
                 pinned=str(e.get("pinned", "")))
             for e in data["pins"]
         ]
+        for p in pins:
+            if not _DIGEST_RE.match(p.digest):
+                raise PinLoadError(f"pin for {p.value!r} has an invalid digest "
+                                   f"{p.digest!r} (want sha256:<64 hex>)")
+    except PinLoadError:
+        raise
     except Exception as exc:
         raise PinLoadError(str(exc)) from exc
     return {p.key: p for p in pins}

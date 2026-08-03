@@ -229,6 +229,40 @@ def test_malformed_pin_file_is_one_note_and_validation_completes(tmp_path):
     assert _fresh_fails(issues) == []                                 # never a failure
 
 
+def test_malformed_digests_route_to_the_malformed_file_path_never_stale(tmp_path):
+    """A garbage digest (null / truncated hash / merge-conflict residue) must NOT become a
+    'valid' pin — its comparison would always mismatch and masquerade as a DETERMINATE
+    stale failure that can halt a blocking repo. Digest shape is validated on load
+    (sha256:<64 hex>); a violation is the malformed-file path: one indeterminate note,
+    all citations unpinned for the run."""
+    cases = {
+        "null-digest": "null",
+        "truncated": "sha256:abc123",
+        "conflict-residue": "'sha256:aaaa <<<<<<< HEAD'",
+    }
+    for name, bad in cases.items():
+        _, build = _domain(tmp_path / name)
+        (build / P.PIN_FILE).write_text(
+            "version: v1\npins:\n"
+            "- citing: specs/001-derived/spec.md\n  relation: derived_from\n"
+            "  value: docs:005-fund-model\n  path: ../docs/specs/005-fund-model/spec.md\n"
+            f"  digest: {bad}\n  pinned: '2026-08-03'\n")
+        try:
+            P.load_pins(build)
+            assert False, f"{name}: an invalid digest must raise PinLoadError"
+        except P.PinLoadError:
+            pass
+        cfg, root, issues = _validate(build)
+        assert _fresh_fails(issues) == [], f"{name}: must never be a stale failure"
+        notes = _fresh(issues)
+        malformed = [i for i in notes if P.PIN_FILE in i.detail]
+        assert len(malformed) == 1 and malformed[0].severity == "note", name
+        assert sum("is unpinned" in i.detail for i in notes) == 2, name
+        # and a blocking repo is never halted by the garbage digest
+        blocking = cfg.model_copy(update={"mode": "blocking"})
+        assert G.gate_decision(blocking, root).decision == "proceed", name
+
+
 # ── US4: enforcement + fail-safe ──
 
 def test_blocking_gate_halts_on_determinate_stale_and_clears_after_repin(tmp_path):
