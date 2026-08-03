@@ -13,10 +13,10 @@ mirrors:
     relation: cites
     value: ARCH-ADR-003
     repo: acme/widgets
-    issue: 42
+    issue: 42          # integer; null ONLY while status is `creating` (R10 intent)
     pinned_digest: sha256:<64hex>
     current_digest: sha256:<64hex>
-    status: open        # open | resolving | resolved | dismissed
+    status: open        # open | creating | resolving | dismissing | resolved | dismissed
 ```
 
 ## Rules
@@ -33,11 +33,17 @@ mirrors:
   every issue).
 - **Tracked, export-ignored**: committed to git (history = audit trail); `export-ignore`d in
   `.gitattributes` like the pins file (not part of the release archive).
-- **Status semantics**: `open` = emitter-owned live mirror; `resolving` = the resolution's
-  audit comment posted, the close still pending — written BETWEEN the two transport mutations
-  (research R9), so a retry completes the close WITHOUT re-posting the comment (found
-  human-closed or deleted at retry → `resolved` record-only); `resolved` = lifecycle completed
-  (retained for audit; a NEW staleness of the same key starts a new lifecycle with a new issue);
-  `dismissed` = human closed while stale — the emitter noted once and will neither comment again
-  nor re-open (further upstream movement stays quiet; later resolution flips to `resolved`
-  record-only). An unknown status remains a typed `IssuesFileError` (load rule above).
+- **Status semantics**: `open` = emitter-owned live mirror. Transient INTENT states
+  (research R10 — "a remote effect may exist; recovery is a bounded marker read at the next
+  apply"): `creating` = a create may have happened, no number recorded (intent written BEFORE
+  the remote create; recovery probes `find_by_marker` — found → adopt, not found → create or,
+  if the fact resolved meanwhile, clear the intent); `resolving` = resolution in progress —
+  intent written BEFORE the audit comment, close pending (recovery marker-checks the issue's
+  comments before re-posting, then closes); `dismissing` = the one continued-staleness note
+  may have posted, confirmation pending (recovery marker-checks before ever re-posting; a
+  resolution arriving meanwhile supersedes record-only). Terminal states: `resolved` =
+  lifecycle completed (retained for audit; a NEW staleness of the same key starts a new
+  lifecycle with a new issue); `dismissed` = human closed while stale — the emitter noted once
+  and will neither comment again nor re-open (further upstream movement stays quiet; later
+  resolution flips to `resolved` record-only). An unknown status remains a typed
+  `IssuesFileError` (load rule above), as does a missing issue number outside `creating`.

@@ -99,6 +99,11 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
 - **Alternatives considered**: labels for identification (kept OPTIONAL as config `labels`
   applied at create — organizational nicety, never identity); timestamps in body (rejected:
   breaks D5 determinism; git/tracker history already timestamps everything).
+- **Title cap (review round 3, P2-4)**: GitHub caps titles at 256 characters; the assembled
+  title is hard-capped deterministically (truncate at 255 + a fixed `…`) so an over-long
+  namespace/value/citing can never fail the create API call. Same fact ⇒ same bytes still
+  holds; the FULL identity always lives in the body fields and the marker (bodies cap at
+  65536 — ours are a few hundred bytes, ample headroom).
 
 ## R7 — CLI contract and exit codes
 
@@ -164,11 +169,55 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   silent mutation OQ-B's audit comment exists to prevent); re-reading the issue's comments for
   the marker before re-commenting (rejected: a network read at recovery time, and the marker is
   forensics — the sidecar is the dedup source of truth, R6).
-- **Residual seam, noted deliberately**: every emit-then-record pair (create, update, the one
-  dismissal comment) still has an irreducible window where the tracker effect succeeded and the
-  local sidecar write then fails — tracker and disk cannot commit atomically, and recording
-  BEFORE the transport call would fabricate state (a note recorded that never posted). The
-  dismissal path needs no `resolving`-style split (it has ONE transport mutation, so there is
-  no inter-mutation boundary to persist). Mitigation: the sidecar write failure is surfaced as
-  the emitter's own typed `EmissionError` (exit 1, actionable, never a traceback), and each
-  path's recovery is at worst one duplicate of a single idempotent-content effect.
+- **Residual seam — SUPERSEDED by R10 (review round 3)**: this decision originally accepted
+  the emit-then-record window ("at worst one duplicate") as irreducible. R10 closes it with
+  two-phase intent states + bounded marker recovery; the typed-`EmissionError` surfacing of a
+  failed sidecar write stands.
+
+## R10 — Two-phase intent + bounded marker recovery (review round 3, P2-2; supersedes R9's residual note)
+
+- **Decision**: every remote effect that a lost sidecar write could duplicate is bracketed by a
+  persisted INTENT state, and recovery from an intent is ONE bounded transport read:
+  - **create**: persist `creating` (no issue number) BEFORE `transport.create`; success records
+    `open`+number. A retry that finds `creating` runs one `find_by_marker` probe (repo-scoped
+    search for the deterministic body marker): found → ADOPT the number (never a duplicate
+    issue); not found → create. Fact gone meanwhile: found → adopt as `open` (the normal
+    lifecycle resolves it next run); not found → the intent is CLEARED (no ghost record).
+  - **resolution comment/close**: `resolving` is the intent, persisted BEFORE the audit
+    comment; a retry entering with `resolving` marker-checks the issue's comments
+    (`has_comment_marker`, issue-scoped) before re-posting, then completes the close.
+  - **dismissal note**: persist `dismissing` BEFORE the one continued-staleness note; confirm
+    `dismissed` after. A retry entering with `dismissing` marker-checks before ever re-posting
+    — the ratified "exactly one comment" (OQ-C) survives any crash. Resolution arriving while
+    `dismissing` supersedes it record-only (the moot note is never posted late).
+  An intent-write failure is a CLEAN abort — nothing remote has happened yet.
+- **Rationale**: R9's "irreducible" claim was wrong: apply time is already networked, so a
+  bounded per-row recovery read is legitimate — it violates neither the offline-dry-run
+  doctrine (dry-run never enters apply) nor the no-full-listing bound (one probe per
+  interrupted row, and interrupted rows are rare). Recording before the effect alone would
+  fabricate state; recording after alone duplicates the effect; intent + marker probe is the
+  minimal honest pair. The sidecar remains the dedup source of truth (R6) — the marker is only
+  the recovery rendezvous.
+- **Alternatives considered**: accepting one duplicate per crash (rejected: the duplicate is
+  exactly the spam FR-005 exists to prevent, and it compounds in CI); full tracker listing at
+  apply start (rejected: unbounded, and R3 already rejected tracker-driven planning);
+  transactional write-ahead files outside the sidecar (rejected: a second state file with the
+  same failure mode, no marker needed anyway).
+- **Caveat, recorded honestly**: `find_by_marker` uses the tracker's search surface, which can
+  index-lag a just-created issue. A probe that false-misses re-creates — the pre-R10 behavior,
+  now confined to the crash+immediate-retry+index-lag corner. The adopt path records the found
+  number verbatim; a fact that moved since the intent updates on the next run.
+
+## R11 — Resolution-detail classification via the current citation set (review round 3, P2-3)
+
+- **Decision**: `_resolution_detail` receives the SAME run's scanned citation-key set
+  (`scan_citations` → pin keys) beside the pin file: citation gone from the citing artifact →
+  "citation removed (pin now orphaned — prune via repin)" / "citation removed"; citation
+  present + pin digest moved → "repinned to <digest>"; citation present + pin unchanged + fact
+  gone → "upstream content restored". Unknown inputs (no pins / no citation knowledge) degrade
+  to honest generics — never a misclassification.
+- **Rationale**: pin presence alone cannot distinguish "upstream restored" from "citation
+  deleted, pin orphaned" — the orphaned pin still returns an unchanged digest, and the audit
+  comment claimed a revert that never happened. Orphaned pins are a normal advisory state
+  (006 FR-007); the closure narrative must name the real cause. Offline and deterministic:
+  the citation set comes from the same engine invocation's scan.

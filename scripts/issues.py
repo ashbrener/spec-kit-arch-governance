@@ -46,10 +46,15 @@ import validate as V  # noqa: E402
 
 MIRROR_FILE = ".spec-arch-issues.yml"
 
-# `resolving` (review round 2, research R9): the sub-row intermediate — the
-# resolution's audit comment posted, the close still pending. Persisted BETWEEN the
-# two transport mutations so a failed close retries WITHOUT re-commenting.
-_STATUSES = ("open", "resolving", "resolved", "dismissed")
+# Transient INTENT statuses (research R9/R10): persisted around remote effects so a
+# retry is idempotent at sub-row granularity, recovered by BOUNDED marker reads —
+#   `creating`   — a create may have happened, no number recorded (intent written
+#                  BEFORE the remote create; recovery = one find_by_marker probe);
+#   `resolving`  — resolution in progress: intent written before the audit comment,
+#                  close pending (recovery marker-checks the comment, then closes);
+#   `dismissing` — the one continued-staleness note may have posted, confirmation
+#                  pending (recovery marker-checks before ever re-posting).
+_STATUSES = ("open", "creating", "resolving", "dismissing", "resolved", "dismissed")
 _DISPOSITIONS = ("create", "update", "resolve", "up-to-date", "skip")
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -129,10 +134,10 @@ class MirrorRecord:
     relation: str          #  ├─ the pin key (identity)
     value: str             # ─┘
     repo: str              # owner/name the issue lives in (from config at emit time)
-    issue: int             # tracker issue number
+    issue: Optional[int]   # tracker issue number — None ONLY for a `creating` intent
     pinned_digest: str     # last-emitted pinned digest
     current_digest: str    # last-emitted current digest
-    status: str            # open | resolved | dismissed
+    status: str            # open | creating | resolving | dismissing | resolved | dismissed
 
     @property
     def key(self) -> P.PinKey:
@@ -160,6 +165,13 @@ def _validate_record(r: MirrorRecord) -> None:
     if r.status not in _STATUSES:
         raise IssuesFileError(f"mirror for {r.value!r} has an unknown status {r.status!r} "
                               f"(want one of {', '.join(_STATUSES)})")
+    if r.status == "creating":
+        if r.issue is not None:
+            raise IssuesFileError(f"mirror for {r.value!r} is a create-intent (`creating`) "
+                                  f"but carries an issue number {r.issue!r}")
+    elif not isinstance(r.issue, int) or isinstance(r.issue, bool):
+        raise IssuesFileError(f"mirror for {r.value!r} ({r.status}) must carry an integer "
+                              f"issue number, got {type(r.issue).__name__}")
     for name in ("pinned_digest", "current_digest"):
         if not _DIGEST_RE.match(getattr(r, name)):
             raise IssuesFileError(f"mirror for {r.value!r} has an invalid {name} "
@@ -193,8 +205,9 @@ def load_mirrors(repo_root) -> dict[P.PinKey, MirrorRecord]:
                 raise IssuesFileError(f"mirror record must be a mapping, "
                                       f"got {type(e).__name__} (merge-damaged?)")
             number = e.get("issue")
-            if not isinstance(number, int) or isinstance(number, bool):
-                raise IssuesFileError(f"mirror record field 'issue' must be an integer, "
+            if number is not None and (not isinstance(number, int) or isinstance(number, bool)):
+                raise IssuesFileError(f"mirror record field 'issue' must be an integer "
+                                      f"(or null for a `creating` intent), "
                                       f"got {type(number).__name__}")
             r = MirrorRecord(citing=_scalar(e, "citing"), relation=_scalar(e, "relation"),
                              value=_scalar(e, "value"), repo=_scalar(e, "repo"),
@@ -253,8 +266,20 @@ def _marker(namespace: str, key: P.PinKey) -> str:
     return f"<!-- {namespace}-governance issues v1 key={key[0]}|{key[1]}|{key[2]} -->"
 
 
+# GitHub caps issue titles at 256 characters (bodies at 65536 — our bodies are a few
+# hundred bytes, ample headroom, and they carry the FULL identity + marker).
+_TITLE_MAX = 256
+
+
 def render_title(fact: StalenessFact, namespace: str) -> str:
-    return f"[{namespace}] Stale citation: {fact.relation} {fact.value} in {fact.citing}"
+    """Deterministic title, hard-capped at GitHub's 256-char limit (round 3 P2-4):
+    over-long titles truncate at 255 chars + a fixed ellipsis — same fact, same
+    bytes (D5). The full untruncated identity always lives in the body fields and
+    the marker comment, which the title never carries alone."""
+    title = f"[{namespace}] Stale citation: {fact.relation} {fact.value} in {fact.citing}"
+    if len(title) > _TITLE_MAX:
+        title = title[:_TITLE_MAX - 1] + "…"
+    return title
 
 
 def render_body(fact: StalenessFact, namespace: str) -> str:
@@ -332,26 +357,36 @@ class PlanRow:
 
     def render(self) -> str:
         loc = f"{self.relation} '{self.value}' in {self.citing}"
-        ref = f"  #{self.record.issue}" if self.record is not None else ""
+        has_number = self.record is not None and self.record.issue is not None
+        ref = f"  #{self.record.issue}" if has_number else ""
         det = f"  ({self.detail})" if self.detail else ""
         return f"  {self.disposition:<10}  {loc}{ref}{det}"
 
 
-def _resolution_detail(record: MirrorRecord, pins) -> str:
-    """Name what resolved a mirrored fact (OQ-B) — derivable OFFLINE from the pin
-    file: a moved pin digest means repinned; an unchanged one means the upstream
-    reverted; a missing pin means the citation (or its pin) was removed."""
+def _resolution_detail(record: MirrorRecord, pins, cited_keys=None) -> str:
+    """Name what resolved a mirrored fact (OQ-B) — offline, from the SAME run's pin
+    file and scanned citation set (round 3 P2-3 / R11). Classification needs the
+    CURRENT citations, not pin presence alone: an orphaned pin (citation deleted,
+    pin not yet pruned) still returns an unchanged pin, and calling that "upstream
+    restored" would be factually wrong. Unknown inputs degrade to honest generics —
+    never a misclassification."""
     if pins is None:
         return "no longer stale"
     pin = pins.get(record.key)
+    if cited_keys is not None and record.key not in cited_keys:
+        if pin is not None:
+            return "no longer stale — citation removed (pin now orphaned — prune via repin)"
+        return "no longer stale — citation removed"
     if pin is None:
         return "no longer stale — the citation (or its pin) was removed"
     if pin.digest != record.pinned_digest:
         return f"no longer stale — repinned to {P.abbrev(pin.digest)}"
-    return "no longer stale — upstream reverted to the pinned state"
+    if cited_keys is None:
+        return "no longer stale"        # citation knowledge unavailable — stay generic
+    return "no longer stale — upstream content restored"
 
 
-def issues_plan(facts, mirrors, pins=None, evaluated=True) -> list[PlanRow]:
+def issues_plan(facts, mirrors, pins=None, evaluated=True, cited_keys=None) -> list[PlanRow]:
     """The deterministic diff of current facts against mirror records — a PURE
     function (offline by construction, D4): every current fact and every recorded
     mirror gets exactly one disposition (FR-004). Rows sorted by pin key.
@@ -361,6 +396,10 @@ def issues_plan(facts, mirrors, pins=None, evaluated=True) -> list[PlanRow]:
     means "not evaluated", not "confirmed resolved" — and it surfaces as an explicit
     `skip` row (never a silent omission, never a close). Facts that ARE present stay
     live: a determinate fact is a fact, so create/update/up-to-date are unaffected.
+
+    `cited_keys` (research R11): the SAME run's scanned citation-key set, used only
+    to classify resolution details (repinned / restored / citation-removed) — an
+    orphaned pin must never be narrated as an upstream revert.
     """
     rows: list[PlanRow] = []
     facts_by_key: dict[P.PinKey, StalenessFact] = {}
@@ -374,6 +413,18 @@ def issues_plan(facts, mirrors, pins=None, evaluated=True) -> list[PlanRow]:
                 detail += "; stale again after resolution — new lifecycle"
             rows.append(PlanRow("create", f.citing, f.relation, f.value, fact=f,
                                 record=None, detail=detail))
+        elif rec.status == "creating":
+            # R10: a prior run's create-intent — an issue MAY exist with no recorded
+            # number. Apply reconciles with ONE bounded marker probe: found → adopt,
+            # not found → create.
+            rows.append(PlanRow("create", f.citing, f.relation, f.value, fact=f, record=rec,
+                                detail="recovering interrupted create — reconciling "
+                                       "with the tracker by marker"))
+        elif rec.status == "dismissing":
+            # R10: the one continued-staleness note may have posted, confirmation
+            # pending — apply marker-checks before ever re-posting.
+            rows.append(PlanRow("up-to-date", f.citing, f.relation, f.value, fact=f,
+                                record=rec, detail="completing pending dismissal note"))
         elif rec.status == "resolving":
             # R9: a close is pending from a prior run whose audit comment already
             # posted — complete THAT lifecycle first; the (re-)stale fact gets its
@@ -405,16 +456,31 @@ def issues_plan(facts, mirrors, pins=None, evaluated=True) -> list[PlanRow]:
             # depend on this run's evaluation status.
             rows.append(PlanRow("resolve", rec.citing, rec.relation, rec.value, record=rec,
                                 detail="completing pending close (audit comment already posted)"))
+        elif rec.status == "creating":
+            # R10: an interrupted create whose fact is now gone — apply reconciles by
+            # marker (found → adopt for a normal lifecycle; not found → clear the
+            # intent). Independent of this run's evaluation status: the probe decides
+            # existence, never resolution.
+            rows.append(PlanRow("resolve", rec.citing, rec.relation, rec.value, record=rec,
+                                detail="recovering interrupted create — reconciling "
+                                       "with the tracker by marker"))
         elif not evaluated:
             # R8: the fact's absence is NOT a confirmed resolution this run.
             rows.append(PlanRow("skip", rec.citing, rec.relation, rec.value, record=rec,
                                 detail="freshness not evaluated — mirror preserved"))
         elif rec.status == "dismissed":
             rows.append(PlanRow("resolve", rec.citing, rec.relation, rec.value, record=rec,
-                                detail=_resolution_detail(rec, pins) + "; record-only (dismissed)"))
+                                detail=_resolution_detail(rec, pins, cited_keys)
+                                       + "; record-only (dismissed)"))
+        elif rec.status == "dismissing":
+            # R10: resolution supersedes the pending dismissal — record-only, and the
+            # continued-staleness note (now moot) is never posted late.
+            rows.append(PlanRow("resolve", rec.citing, rec.relation, rec.value, record=rec,
+                                detail=_resolution_detail(rec, pins, cited_keys)
+                                       + "; resolution supersedes pending dismissal"))
         else:
             rows.append(PlanRow("resolve", rec.citing, rec.relation, rec.value, record=rec,
-                                detail=_resolution_detail(rec, pins)))
+                                detail=_resolution_detail(rec, pins, cited_keys)))
     return sorted(rows, key=lambda r: r.key)
 
 
@@ -454,6 +520,9 @@ class IssueTransport(Protocol):
     def update_body(self, repo: str, number: int, body: str) -> None: ...
     def comment(self, repo: str, number: int, body: str) -> None: ...
     def close(self, repo: str, number: int) -> None: ...
+    # Bounded recovery reads (R10) — apply-time only, one call per interrupted row:
+    def find_by_marker(self, repo: str, marker: str) -> Optional[int]: ...
+    def has_comment_marker(self, repo: str, number: int, marker: str) -> bool: ...
 
 
 class GhTransport:
@@ -489,6 +558,14 @@ class GhTransport:
     def _argv_close(self, repo: str, number: int) -> list[str]:
         return [self.gh, "api", f"repos/{repo}/issues/{number}", "-X", "PATCH",
                 "-f", "state=closed"]
+
+    def _argv_find_by_marker(self, repo: str, marker: str) -> list[str]:
+        # one bounded search, scoped to the configured repo + the deterministic marker
+        return [self.gh, "api", "-X", "GET", "search/issues",
+                "-f", f'q=repo:{repo} in:body "{marker}"']
+
+    def _argv_list_comments(self, repo: str, number: int) -> list[str]:
+        return [self.gh, "api", f"repos/{repo}/issues/{number}/comments"]
 
     # execution
 
@@ -541,10 +618,11 @@ class GhTransport:
 
 # ──────────────────────────── the apply loop (FR-009/FR-011) ────────────────────────────
 
-def _audit(action: str, row: PlanRow, number: int, detail: str = "") -> str:
+def _audit(action: str, row: PlanRow, number: Optional[int], detail: str = "") -> str:
     loc = f"{row.relation} '{row.value}' in {row.citing}"
+    ref = f"  #{number}" if number is not None else ""
     det = f"  ({detail})" if detail else ""
-    return f"  {action:<10}  {loc}  #{number}{det}"
+    return f"  {action:<10}  {loc}{ref}{det}"
 
 
 def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
@@ -560,18 +638,32 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
     ns, target = cfg.namespace, cfg.issues.repository
     mutated = False
 
-    def record(rec: MirrorRecord) -> None:
-        mirrors[rec.key] = rec
+    def _persist() -> None:
         try:
             write_mirrors(repo_root, mirrors.values())
         except OSError as exc:
-            # The emit-then-record seam: the tracker effect happened but the local
-            # record could not be written. Surface as the emitter's own typed
-            # failure (exit 1, actionable) — never a raw traceback (R9 note).
+            # The record write failed AFTER a remote effect may have happened.
+            # Surface as the emitter's own typed failure (exit 1, actionable) —
+            # never a raw traceback; the R10 intent states make the retry safe.
             raise EmissionError(
                 f"could not record mirror state in {MIRROR_FILE}: {exc}") from exc
 
+    def record(rec: MirrorRecord) -> None:
+        mirrors[rec.key] = rec
+        _persist()
+
+    def erase(key: P.PinKey) -> None:
+        del mirrors[key]
+        _persist()
+
     def create_issue(row: PlanRow, f: StalenessFact, note: str) -> None:
+        # R10 two-phase intent: persist `creating` BEFORE the remote effect — an
+        # intent-write failure is a clean abort (nothing remote has happened), and
+        # an intent without a number tells the NEXT run "a create may exist; probe
+        # by marker before creating again".
+        record(MirrorRecord(citing=f.citing, relation=f.relation, value=f.value,
+                            repo=target, issue=None, pinned_digest=f.pinned_digest,
+                            current_digest=f.current_digest, status="creating"))
         number = transport.create(target, render_title(f, ns), render_body(f, ns),
                                   list(cfg.issues.labels))
         record(MirrorRecord(citing=f.citing, relation=f.relation, value=f.value,
@@ -581,18 +673,34 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
 
     def dismiss(row: PlanRow, rec: MirrorRecord, f: StalenessFact) -> None:
         # OQ-C respect-and-note: exactly ONE comment, never re-open. Digests stay
-        # last-emitted (R5): the body was not updated.
+        # last-emitted (R5): the body was not updated. R10 intent discipline: the
+        # `dismissing` intent is persisted BEFORE the note, so an interrupted
+        # confirm write can never cause a double post (retry marker-checks).
+        record(replace(rec, status="dismissing"))
         transport.comment(rec.repo, rec.issue, render_dismissal_comment(f, ns))
         record(replace(rec, status="dismissed"))
         report.append(_audit("dismissed", row, rec.issue,
                              "closed by operator while still stale — noted, "
                              "will not re-open"))
 
+    def finish_dismissal(row: PlanRow, rec: MirrorRecord, f: StalenessFact) -> None:
+        # R10 recovery: the note may or may not have posted — ONE bounded,
+        # issue-scoped marker check decides; never a second note.
+        if not transport.has_comment_marker(rec.repo, rec.issue, _marker(ns, row.key)):
+            transport.comment(rec.repo, rec.issue, render_dismissal_comment(f, ns))
+        record(replace(rec, status="dismissed"))
+        report.append(_audit("dismissed", row, rec.issue,
+                             "completed pending dismissal note — will not re-open"))
+
     for row in rows:
         if row.disposition == "skip":
             continue
         if row.disposition == "up-to-date":
             rec, f = row.record, row.fact
+            if rec is not None and rec.status == "dismissing" and f is not None:
+                finish_dismissal(row, rec, f)
+                mutated = True
+                continue
             # Round 2 P2-1: EVERY live (open) mirror gets an apply-time reality
             # check — including unchanged ones — else a human closure or deletion
             # with a quiet upstream is never noticed (no dismissal note, no
@@ -612,8 +720,20 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                 mutated = True
             continue
         if row.disposition == "create":
-            f = row.fact
+            f, rec = row.fact, row.record
             assert f is not None
+            if rec is not None and rec.status == "creating":
+                # R10 recovery: a create may have happened — ONE bounded marker
+                # probe; found → adopt the number, never a duplicate issue.
+                found = transport.find_by_marker(rec.repo, _marker(ns, row.key))
+                if found is not None:
+                    record(replace(rec, issue=found, status="open"))
+                    report.append(_audit("adopted", row, found,
+                                         "interrupted create recovered — issue "
+                                         "found by marker"))
+                    mutated = True
+                    continue
+                # probe found nothing → the create never happened; fall through
             create_issue(row, f, row.detail)
             mutated = True
         elif row.disposition == "update":
@@ -638,6 +758,32 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
         elif row.disposition == "resolve":
             rec = row.record
             assert rec is not None
+            if rec.status == "creating":
+                # R10 recovery, fact no longer present: probe by marker — found →
+                # adopt (a normal lifecycle resolves it next run); not found → the
+                # create never happened, clear the intent (no ghost record).
+                found = transport.find_by_marker(rec.repo, _marker(ns, row.key))
+                if found is None:
+                    erase(row.key)
+                    report.append(_audit("recorded", row, None,
+                                         "interrupted create never happened — "
+                                         "intent cleared"))
+                else:
+                    record(replace(rec, issue=found, status="open"))
+                    report.append(_audit("adopted", row, found,
+                                         "interrupted create recovered — issue found "
+                                         "by marker; lifecycle continues next run"))
+                mutated = True
+                continue
+            if rec.status == "dismissing":
+                # R10: resolution supersedes the pending dismissal — the (now moot)
+                # continued-staleness note is never posted late; record-only.
+                record(replace(rec, status="resolved"))
+                report.append(_audit("recorded", row, rec.issue,
+                                     "resolution supersedes pending dismissal; "
+                                     "no note posted"))
+                mutated = True
+                continue
             if rec.status == "dismissed":
                 # the human already closed it; resolution is record-only (R5)
                 record(replace(rec, status="resolved"))
@@ -658,14 +804,19 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                 report.append(_audit("recorded", row, rec.issue,
                                      "already closed; resolution recorded"))
             else:
-                # R9 sub-row idempotency: the audit comment and the close straddle a
-                # failure seam. Persist the intermediate `resolving` status BETWEEN
-                # them, so a failed close retries WITHOUT re-posting the comment —
-                # FR-009's partial-success contract at sub-row granularity.
+                # R9/R10 sub-row idempotency: the `resolving` INTENT is persisted
+                # BEFORE the audit comment; a retry that enters with `resolving`
+                # marker-checks the issue's comments (one bounded, issue-scoped
+                # read) before re-posting, then completes the close — no duplicate
+                # audit comments, no close without its audit trail.
                 if rec.status != "resolving":
+                    record(replace(rec, status="resolving"))
                     transport.comment(rec.repo, rec.issue,
                                       render_resolution_comment(rec, row.detail, ns))
-                    record(replace(rec, status="resolving"))
+                elif not transport.has_comment_marker(rec.repo, rec.issue,
+                                                      _marker(ns, row.key)):
+                    transport.comment(rec.repo, rec.issue,
+                                      render_resolution_comment(rec, row.detail, ns))
                 transport.close(rec.repo, rec.issue)
                 record(replace(rec, status="resolved"))
                 report.append(_audit("resolved", row, rec.issue,
@@ -724,7 +875,12 @@ def main(argv=None, transport: Optional[IssueTransport] = None) -> int:
         pins = P.load_pins(repo_root)
     except P.PinLoadError:
         pins = None                              # resolution detail degrades gracefully
-    rows = issues_plan(facts, mirrors, pins, evaluated)
+    # R11: the SAME run's citation-key set — classifies resolution details (an
+    # orphaned pin is "citation removed", never an upstream revert). Offline.
+    cited_keys = {P.pin_key(c.source, c.relation, c.raw)
+                  for c in V.scan_citations(repo_root, cfg.specs_dir,
+                                            cfg.citation_keys, cfg.namespace)}
+    rows = issues_plan(facts, mirrors, pins, evaluated, cited_keys)
     print(render_plan(rows))
 
     if not args.apply:

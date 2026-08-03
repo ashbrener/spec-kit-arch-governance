@@ -91,6 +91,11 @@ class FakeTransport:
         self.fail_at = {}
         self._counts = {}
         self.next_number = 101
+        # tracker state carried across "runs" (seeded by tests) + recorded this run
+        self.seeded_issue_bodies = {}    # number -> body (pre-existing issues)
+        self.seeded_comments = {}        # number -> [comment bodies]
+        self.created = {}                # number -> body (created THIS run)
+        self.posted = {}                 # number -> [comment bodies posted THIS run]
 
     def _record(self, method, *args):
         self._counts[method] = self._counts.get(method, 0) + 1
@@ -115,6 +120,7 @@ class FakeTransport:
         n = self.next_number
         self.next_number += 1
         self.states[n] = "open"
+        self.created[n] = body
         return n
 
     def update_body(self, repo, number, body):
@@ -122,10 +128,23 @@ class FakeTransport:
 
     def comment(self, repo, number, body):
         self._record("comment", repo, number, body)
+        self.posted.setdefault(number, []).append(body)
 
     def close(self, repo, number):
         self._record("close", repo, number)
         self.states[number] = "closed"
+
+    def find_by_marker(self, repo, marker):
+        self._record("find_by_marker", repo, marker)
+        for n, body in {**self.seeded_issue_bodies, **self.created}.items():
+            if marker in body:
+                return n
+        return None
+
+    def has_comment_marker(self, repo, number, marker):
+        self._record("has_comment_marker", repo, number, marker)
+        bodies = self.seeded_comments.get(number, []) + self.posted.get(number, [])
+        return any(marker in b for b in bodies)
 
     def of(self, method):
         return [c for c in self.calls if c[0] == method]
@@ -386,7 +405,9 @@ def _apply(build, cfg, root, facts, transport, mirrors=None):
     mirrors = dict(ISS.load_mirrors(root) if mirrors is None else mirrors)
     issues, _ = V.validate(cfg, root)                      # same-run evaluation signal (R8)
     evaluated = ISS.freshness_evaluated(cfg, issues)
-    rows = ISS.issues_plan(facts, mirrors, P.load_pins(root), evaluated)
+    cited = {P.pin_key(c.source, c.relation, c.raw)        # same-run citation set (R11)
+             for c in V.scan_citations(root, cfg.specs_dir, cfg.citation_keys, cfg.namespace)}
+    rows = ISS.issues_plan(facts, mirrors, P.load_pins(root), evaluated, cited)
     report: list[str] = []
     mutated = ISS.apply_plan(rows, mirrors, cfg, root, transport, report)
     return rows, report, mutated
@@ -422,15 +443,18 @@ def test_apply_writes_sidecar_after_each_success_partial_failure_resumes(tmp_pat
     with pytest.raises(ISS.EmissionError):
         _apply(build, cfg, root, facts, t)
     mirrors = _mirrors(build)
-    assert len(mirrors) == 1                              # row 1 recorded, row 2 NOT (FR-009)
-    assert facts[0].key in mirrors and facts[1].key not in mirrors
-    # re-run resumes idempotently: only the missing fact is created
+    # row 1 fully recorded; row 2 is only the R10 create-INTENT (no issue number —
+    # nothing remote happened for it: the create call itself raised)
+    assert mirrors[facts[0].key].status == "open" and mirrors[facts[0].key].issue == 101
+    assert mirrors[facts[1].key].status == "creating" and mirrors[facts[1].key].issue is None
+    # re-run resumes idempotently: marker probe finds nothing → exactly one create
     t2 = FakeTransport()
     t2.next_number = 500
     _apply(build, cfg, root, facts, t2)
     assert len(t2.of("create")) == 1
+    assert len(t2.of("find_by_marker")) == 1              # the bounded recovery read
     mirrors = _mirrors(build)
-    assert mirrors[facts[1].key].issue == 500
+    assert mirrors[facts[1].key].issue == 500 and mirrors[facts[1].key].status == "open"
     assert mirrors[facts[0].key].issue == 101             # untouched
 
 
@@ -736,19 +760,284 @@ def test_deleted_issue_and_resolved_is_record_only(tmp_path):
     assert len(report) == 1 and "deleted repo-side" in report[0]   # never a crash
 
 
-def test_resolution_detail_distinguishes_repin_revert_and_removal(tmp_path):
+def test_resolution_detail_classifications(tmp_path):
+    """Round 3 P2-3: classification uses the CURRENT citation set from the same run,
+    not pin presence alone — an orphaned pin is never mistaken for a revert."""
     src, build, k = _mirrored_stale(tmp_path)
     rec = _mirrors(build)[k]
     pins = P.load_pins(build)
-    # upstream reverted: pin digest unchanged, fact gone
-    assert "reverted" in ISS._resolution_detail(rec, pins)
-    # repinned: pin digest moved
+    cited = {k}
+    # citation present + pin unchanged + fact gone → upstream content restored
+    assert ISS._resolution_detail(rec, pins, cited) == "no longer stale — upstream content restored"
+    # citation present + pin digest moved → repinned
     assert R.main([str(build), "--apply"]) == 0
-    assert "repinned" in ISS._resolution_detail(rec, P.load_pins(build))
-    # citation/pin removed
-    assert "removed" in ISS._resolution_detail(rec, {})
+    assert "repinned" in ISS._resolution_detail(rec, P.load_pins(build), cited)
+    # citation GONE + pin still present → orphaned wording, never "restored"/"reverted"
+    d = ISS._resolution_detail(rec, pins, set())
+    assert "citation removed" in d and "orphaned" in d and "prune" in d
+    assert "restored" not in d and "reverted" not in d
+    # citation gone + pin gone → plain removal
+    assert ISS._resolution_detail(rec, {}, set()) == "no longer stale — citation removed"
     # no pin knowledge at all (malformed pin file) → honest generic
-    assert ISS._resolution_detail(rec, None) == "no longer stale"
+    assert ISS._resolution_detail(rec, None, cited) == "no longer stale"
+    # no citation knowledge (fallback) + pin unchanged → generic, never a misclassification
+    assert ISS._resolution_detail(rec, pins, None) == "no longer stale"
+
+
+# ═══ Review round 3 — P2-1: `issues` survives every config serializer ═══
+
+def test_config_to_yaml_roundtrips_issues_section():
+    import install as I
+    cfg = GovernanceConfig(role="build", namespace="API",
+                           issues=IssuesConfig(enabled=True, repository="acme/widgets",
+                                               labels=["staleness"]))
+    loaded = GovernanceConfig.model_validate(yaml.safe_load(I.config_to_yaml(cfg)))
+    assert loaded.issues == cfg.issues                     # opt-in round-trips
+    assert loaded == cfg
+    # default-disabled stays omitted (absent ≡ disabled is the section's semantic)
+    plain = yaml.safe_load(I.config_to_yaml(GovernanceConfig(role="build", namespace="API")))
+    assert "issues" not in plain
+
+
+def test_sync_apply_preserves_issues_opt_in(tmp_path, capsys):
+    import domain as D
+    import sync as S
+    src, build = _domain(tmp_path)
+    _enable(build, labels=("staleness",))
+    (src / D.DOMAIN_NAME).write_text(
+        "version: v1\nmembers:\n"
+        "  - {name: docs, role: source, namespace: CORE, locator: .}\n"
+        "  - {name: build, role: build, namespace: SVC, locator: ../build}\n")
+    before = V.load_config(build)[0]
+    assert before.issues.enabled and before.namespace == "API"     # drifted vs manifest
+    assert S.main([str(build), "--source", "../docs", "--apply"]) == 0
+    out = capsys.readouterr().out
+    assert "APPLIED" in out
+    after = V.load_config(build)[0]
+    assert after.namespace == "SVC"                        # manifest field reconciled
+    assert after.issues.enabled is True                    # opt-in NOT silently dropped
+    assert after.issues.repository == "acme/widgets"
+    assert after.issues.labels == ["staleness"]
+
+
+# ═══ Review round 3 — P2-2: two-phase intent + bounded marker recovery (R10) ═══
+
+def _one_stale_enabled(tmp):
+    src, build = _domain(tmp)
+    _pin(build)
+    _go_stale(src)
+    _enable(build)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    k = ("specs/001-derived/spec.md", "derived_from", "docs:005-fund-model")
+    return src, build, cfg, root, ISS.staleness_facts(issues), k
+
+
+def test_record_failure_after_create_recovers_by_marker_no_duplicate(tmp_path, monkeypatch):
+    src, build, cfg, root, facts, k = _one_stale_enabled(tmp_path)
+    real = ISS.write_mirrors
+    n = {"count": 0}
+
+    def flaky(root_, records):                             # fail ONLY the post-create write
+        n["count"] += 1
+        if n["count"] == 2:
+            raise OSError("disk full")
+        return real(root_, records)
+
+    monkeypatch.setattr(ISS, "write_mirrors", flaky)
+    t = FakeTransport()
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)
+    assert len(t.of("create")) == 1                        # the remote effect DID happen
+    rec = ISS.load_mirrors(build)[k]
+    assert rec.status == "creating" and rec.issue is None  # intent persisted, number lost
+    # retry: the tracker still holds the created issue — found by marker, adopted
+    t2 = FakeTransport()
+    t2.seeded_issue_bodies[101] = t.created[101]
+    rows, report, _ = _apply(build, cfg, root, facts, t2)
+    assert t2.of("create") == []                           # ZERO duplicate issues
+    assert len(t2.of("find_by_marker")) == 1               # one bounded recovery read
+    rec = _mirrors(build)[k]
+    assert rec.status == "open" and rec.issue == 101
+    assert len(report) == 1 and "adopted" in report[0] and "#101" in report[0]
+
+
+def test_intent_with_no_remote_effect_creates_exactly_once(tmp_path):
+    src, build, cfg, root, facts, k = _one_stale_enabled(tmp_path)
+    t = FakeTransport()
+    t.fail["create"] = ISS.EmissionError("boom")
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)
+    rec = ISS.load_mirrors(build)[k]
+    assert rec.status == "creating" and rec.issue is None and t.created == {}
+    t2 = FakeTransport()                                   # marker probe finds nothing
+    rows, report, _ = _apply(build, cfg, root, facts, t2)
+    assert len(t2.of("find_by_marker")) == 1
+    assert len(t2.of("create")) == 1                       # exactly one create
+    assert _mirrors(build)[k].status == "open" and _mirrors(build)[k].issue == 101
+
+
+def test_interrupted_create_with_fact_resolved_clears_intent(tmp_path):
+    src, build, cfg, root, facts, k = _one_stale_enabled(tmp_path)
+    t = FakeTransport()
+    t.fail["create"] = ISS.EmissionError("boom")
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)                 # intent, nothing remote
+    assert R.main([str(build), "--apply"]) == 0            # fact resolves meanwhile
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t2 = FakeTransport()
+    rows, report, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t2)
+    assert len(t2.of("find_by_marker")) == 1               # bounded reconciliation
+    assert t2.of("create") == [] and t2.of("close") == []
+    assert ISS.load_mirrors(build) == {}                   # intent cleared — no ghost record
+    assert len(report) == 1 and "intent cleared" in report[0]
+
+
+def test_interrupted_create_with_fact_resolved_adopts_found_issue(tmp_path, monkeypatch):
+    src, build, cfg, root, facts, k = _one_stale_enabled(tmp_path)
+    real = ISS.write_mirrors
+    n = {"count": 0}
+
+    def flaky(root_, records):
+        n["count"] += 1
+        if n["count"] == 2:
+            raise OSError("disk full")
+        return real(root_, records)
+
+    monkeypatch.setattr(ISS, "write_mirrors", flaky)
+    t = FakeTransport()
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)                 # created remotely, unrecorded
+    assert R.main([str(build), "--apply"]) == 0            # fact resolves meanwhile
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t2 = FakeTransport()
+    t2.seeded_issue_bodies[101] = t.created[101]
+    rows, report, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t2)
+    assert t2.of("create") == []
+    rec = _mirrors(build)[k]
+    assert rec.status == "open" and rec.issue == 101       # adopted; resolves next run
+    t3 = FakeTransport()
+    t3.states[101] = "open"
+    rows3, report3, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t3)
+    assert [r.disposition for r in rows3] == ["resolve"]
+    assert _mirrors(build)[k].status == "resolved"
+
+
+def test_dismissal_note_retry_never_double_posts(tmp_path, monkeypatch):
+    src, build, k = _mirrored_stale(tmp_path)              # open mirror #101, still stale
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    real = ISS.write_mirrors
+    n = {"count": 0}
+
+    def flaky(root_, records):                             # fail the dismissed-CONFIRM write
+        n["count"] += 1
+        if n["count"] == 2:                                # 1: dismissing intent, 2: confirm
+            raise OSError("disk full")
+        return real(root_, records)
+
+    monkeypatch.setattr(ISS, "write_mirrors", flaky)
+    t = FakeTransport()
+    t.states[101] = "closed"                               # human closed while still stale
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)
+    assert len(t.of("comment")) == 1                       # the one note DID post
+    rec = ISS.load_mirrors(build)[k]
+    assert rec.status == "dismissing"                      # intent persisted
+    # retry: tracker carries the note — marker check prevents a double post
+    t2 = FakeTransport()
+    t2.states[101] = "closed"
+    t2.seeded_comments[101] = list(t.posted.get(101, []))
+    rows, report, _ = _apply(build, cfg, root, facts, t2)
+    assert t2.of("comment") == []                          # ZERO re-posts
+    assert _mirrors(build)[k].status == "dismissed"
+    assert len(report) == 1 and "dismissed" in report[0]
+
+
+def test_mirror_file_roundtrips_intent_statuses(tmp_path):
+    creating = _rec(status="creating", issue=None)
+    dismissing = _rec(citing="specs/001-derived/plan.md", relation="cites",
+                      value="CORE-ADR-001", status="dismissing")
+    ISS.write_mirrors(tmp_path, [creating, dismissing])
+    loaded = ISS.load_mirrors(tmp_path)
+    assert loaded[creating.key].status == "creating" and loaded[creating.key].issue is None
+    assert loaded[dismissing.key].status == "dismissing" and loaded[dismissing.key].issue == 42
+    # a missing issue number is ONLY legal for a creating intent
+    bad = yaml.safe_load((tmp_path / ISS.MIRROR_FILE).read_text())
+    for m in bad["mirrors"]:
+        m["issue"] = None                                  # dismissing loses its number
+    (tmp_path / ISS.MIRROR_FILE).write_text(yaml.safe_dump(bad))
+    with pytest.raises(ISS.IssuesFileError):
+        ISS.load_mirrors(tmp_path)
+
+
+def test_gh_transport_recovery_read_commands():
+    g = ISS.GhTransport()
+    argv = g._argv_find_by_marker("o/r", "<!-- m -->")
+    assert argv[:2] == ["gh", "api"] and "search/issues" in argv
+    assert any("repo:o/r" in a and "<!-- m -->" in a for a in argv)
+    argv = g._argv_list_comments("o/r", 7)
+    assert argv[:2] == ["gh", "api"] and "repos/o/r/issues/7/comments" in argv
+
+
+# ═══ Review round 3 — P2-3: resolution detail via the current citation set ═══
+
+def test_orphaned_pin_resolution_names_citation_removal_not_revert(tmp_path):
+    src, build, k = _mirrored_stale(tmp_path)
+    # the citation is deleted from the citing artifact; the pin is NOT pruned
+    (build / "specs" / "001-derived" / "spec.md").write_text(
+        "---\nderived_from: []\n---\n# Derived spec\n")
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    assert facts == [] and ISS.freshness_evaluated(cfg, issues)   # orphan note is benign
+    t = FakeTransport()
+    t.states[101] = "open"
+    rows, report, _ = _apply(build, cfg, root, facts, t)
+    by_key = {r.key: r for r in rows}
+    assert by_key[k].disposition == "resolve"
+    assert "citation removed" in by_key[k].detail and "orphaned" in by_key[k].detail
+    comment = t.of("comment")[0][3]
+    assert "citation removed" in comment and "prune" in comment
+    assert "restored" not in comment and "reverted" not in comment  # never the false claim
+
+
+def test_upstream_restored_resolution_names_restoration(tmp_path):
+    src, build, k = _mirrored_stale(tmp_path)
+    (src / "specs" / "005-fund-model" / "spec.md").write_text(UPSTREAM_SPEC)  # back to pinned
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t = FakeTransport()
+    t.states[101] = "open"
+    rows, report, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t)
+    assert "upstream content restored" in t.of("comment")[0][3]
+    assert _mirrors(build)[k].status == "resolved"
+
+
+# ═══ Review round 3 — P2-4: deterministic 256-char title cap ═══
+
+def test_title_is_capped_at_256_chars_deterministically():
+    long_fact = ISS.StalenessFact(
+        relation="derived_from", value="docs:" + "x" * 300,
+        citing="specs/001-very-long-feature-name/spec.md", cited_display="d",
+        pinned_digest="sha256:" + "a" * 64, pinned_date="2026-08-03",
+        current_digest="sha256:" + "b" * 64)
+    t1 = ISS.render_title(long_fact, "API")
+    assert len(t1) == 256 and t1.endswith("…")             # hard cap, fixed ellipsis
+    assert ISS.render_title(long_fact, "API") == t1        # identical bytes (D5)
+    body = ISS.render_body(long_fact, "API")
+    assert long_fact.value in body                         # full identity intact in the body
+    assert ISS._marker("API", long_fact.key) in body
+    assert len(body) < 65536                               # GitHub body limit — ample headroom
+    normal = ISS.StalenessFact(
+        relation="cites", value="CORE-ADR-001", citing="specs/001-derived/plan.md",
+        cited_display="d", pinned_digest="sha256:" + "a" * 64, pinned_date="2026-08-03",
+        current_digest="sha256:" + "b" * 64)
+    assert ISS.render_title(normal, "API") == (
+        "[API] Stale citation: cites CORE-ADR-001 in specs/001-derived/plan.md")
 
 
 # ═══ Review round 2 — P2-1: every live mirror gets an apply-time reality check ═══
@@ -818,7 +1107,9 @@ def test_reality_check_skips_non_live_rows(tmp_path):
 
 def _resolving(tmp):
     """Drive a mirrored fact to the `resolving` intermediate state: audit comment
-    posted, close failed. Returns (src, build, k, cfg, root, facts)."""
+    posted, close failed. Returns (src, build, k, cfg, root, facts, t) — t is the
+    failed run's transport, whose posted comments tests seed into the retry's fake
+    (simulating the tracker's persistent state across runs)."""
     src, build, k = _mirrored_stale(tmp)
     assert R.main([str(build), "--apply"]) == 0        # the author repins — resolved
     cfg, root = V.load_config(build)
@@ -831,14 +1122,16 @@ def _resolving(tmp):
         _apply(build, cfg, root, facts, t)
     assert len(t.of("comment")) == 1                   # the audit comment DID post
     assert ISS.load_mirrors(build)[k].status == "resolving"
-    return src, build, k, cfg, root, facts
+    return src, build, k, cfg, root, facts, t
 
 
 def test_close_failure_persists_resolving_and_retry_never_recomments(tmp_path):
-    src, build, k, cfg, root, facts = _resolving(tmp_path)
+    src, build, k, cfg, root, facts, t1 = _resolving(tmp_path)
     assert ISS.load_mirrors(build)[k].status == "resolving"   # sub-row state persisted
     t2 = FakeTransport()
     t2.states[101] = "open"
+    # the tracker carries the comment posted last run (R10: retry marker-checks it)
+    t2.seeded_comments[101] = list(t1.posted.get(101, []))
     rows, report, _ = _apply(build, cfg, root, facts, t2)
     assert t2.of("comment") == []                      # ZERO new comments
     assert len(t2.of("close")) == 1                    # exactly the pending close
@@ -851,7 +1144,7 @@ def test_close_failure_persists_resolving_and_retry_never_recomments(tmp_path):
 
 
 def test_resolving_record_found_closed_or_deleted_is_record_only(tmp_path):
-    src, build, k, cfg, root, facts = _resolving(tmp_path)
+    src, build, k, cfg, root, facts, _t1 = _resolving(tmp_path)
     t2 = FakeTransport()
     t2.states[101] = "closed"                          # human closed it meanwhile
     rows, report, _ = _apply(build, cfg, root, facts, t2)
@@ -861,7 +1154,7 @@ def test_resolving_record_found_closed_or_deleted_is_record_only(tmp_path):
 
 
 def test_restale_fact_with_pending_close_completes_the_old_lifecycle_first(tmp_path):
-    src, build, k, cfg, root, _ = _resolving(tmp_path)
+    src, build, k, cfg, root, _facts0, t1 = _resolving(tmp_path)
     (src / "specs" / "005-fund-model" / "spec.md").write_text(
         UPSTREAM_SPEC.replace("v1", "v7"))             # stale AGAIN while close pending
     cfg, root = V.load_config(build)
@@ -870,6 +1163,7 @@ def test_restale_fact_with_pending_close_completes_the_old_lifecycle_first(tmp_p
     assert len(facts) == 1
     t = FakeTransport()
     t.states[101] = "open"
+    t.seeded_comments[101] = list(t1.posted.get(101, []))   # tracker carries last run's comment
     rows, report, _ = _apply(build, cfg, root, facts, t)
     by_key = {r.key: r for r in rows}
     assert by_key[k].disposition == "resolve"          # complete the pending close first
@@ -1033,7 +1327,11 @@ def test_transport_failing_on_every_call_exits_1_records_nothing(tmp_path, capsy
     assert ISS.main([str(build), "--apply"], transport=t) == 1
     err = capsys.readouterr().err
     assert "credential missing" in err                     # the failure named
-    assert not (build / ISS.MIRROR_FILE).exists()          # zero mirrors for failed rows
+    # no successful mirror recorded: at most the R10 create-INTENT for the failed
+    # first row (status creating, no issue number — nothing remote happened)
+    mirrors = ISS.load_mirrors(build)
+    assert all(r.status == "creating" and r.issue is None for r in mirrors.values())
+    assert len(mirrors) <= 1
 
 
 def test_enforcement_is_byte_identical_with_emitter_enabled_vs_absent(tmp_path, capsys):
@@ -1223,7 +1521,11 @@ def test_cli_apply_emission_failure_is_exit_1_naming_the_failure(tmp_path, capsy
     assert "rate limited" in captured.err                  # the failure named
     assert "re-run" in captured.err                        # resume is advertised
     assert "created" in captured.out                       # succeeded row still audited
-    assert len(_mirrors(build)) == 1                       # partial success recorded exactly
+    mirrors = _mirrors(build)                              # partial success recorded exactly:
+    opened = [r for r in mirrors.values() if r.status == "open"]
+    assert len(opened) == 1 and opened[0].issue == 101     # one success; the failed row is
+    assert all(r.issue is None for r in mirrors.values()   # at most a numberless R10 intent
+               if r.status == "creating")
 
 
 def test_cli_apply_with_nothing_to_do_says_up_to_date(tmp_path, capsys):

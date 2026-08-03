@@ -49,9 +49,11 @@ Plan header, then one line per executed row naming fact, action taken, and issue
 (FR-011). At apply time EVERY live (`open`-status) mirror row — including up-to-date ones — is
 reality-checked with one `get_state` (no full listing; R4): an unchanged mirror found still
 open executes nothing and prints no line; one found human-closed while still stale takes the
-respect-and-note path, and one found deleted starts a new lifecycle. A resolve interrupted
-between its audit comment and its close resumes from the persisted `resolving` state without
-re-commenting (R9). Apply-time adjustments are surfaced explicitly:
+respect-and-note path, and one found deleted starts a new lifecycle. Interrupted rows resume
+from persisted intent states (R9/R10) with ONE bounded recovery read each — an interrupted
+create probes the repo for the deterministic marker (found → adopted, never a duplicate
+issue); interrupted resolution/dismissal comments are marker-checked on the target issue
+before any re-post — never a full listing, and dry-run still performs zero network calls. Apply-time adjustments are surfaced explicitly:
 
 ```
   dismissed   cites 'ARCH-ADR-003' in specs/006-y/spec.md  #42  (closed by operator while still stale — noted, will not re-open)

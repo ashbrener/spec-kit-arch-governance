@@ -33,21 +33,25 @@ One entry per mirrored fact. File: `version: v1`, records sorted by pin key (det
 |---|---|---|
 | `citing` / `relation` / `value` | `str` | the pin key (identity) |
 | `repo` | `str` | `owner/name` the issue lives in (from config at emit time) |
-| `issue` | `int` | tracker issue number |
+| `issue` | `int \| null` | tracker issue number — `null` ONLY for a `creating` intent (R10) |
 | `pinned_digest` | `str` | last-emitted pinned digest |
 | `current_digest` | `str` | last-emitted current digest |
-| `status` | `str` | `open` \| `resolving` \| `resolved` \| `dismissed` |
+| `status` | `str` | `open` \| `creating` \| `resolving` \| `dismissing` \| `resolved` \| `dismissed` |
 
 **States & transitions** (writer: the apply loop only):
 
-- ∅ → `open` — apply performed **create**.
+- ∅ → `creating` — the R10 create-INTENT, persisted BEFORE the remote create (no issue
+  number; an intent-write failure is a clean abort). `creating` → `open` — the create
+  succeeded and its number was recorded, or a retry ADOPTED the issue found by marker.
+  `creating` → ∅ — retry probe found nothing and the fact is gone: intent cleared.
 - `open` → `open` — apply performed **update** (content state moved; digests refreshed).
 - `open` → `resolved` — apply performed **resolve** (close + audit comment), or found the issue
   already human-closed while the fact is resolved (record-only, no comment).
-- `open` → `resolving` — the resolution's audit comment posted, the close still pending —
-  written BETWEEN the two transport mutations (R9), so a failed close retries WITHOUT
-  re-commenting. `resolving` → `resolved` — the pending close completed (or the issue was found
-  human-closed/deleted: record-only). Completing a pending close ignores the run's R8
+- `open` → `resolving` — the resolution INTENT, persisted BEFORE the audit comment (R9 as
+  refined by R10): the comment may or may not have posted. A retry marker-checks the issue's
+  comments (one bounded, issue-scoped read) before re-posting, then completes the close.
+  `resolving` → `resolved` — close completed (or the issue was found human-closed/deleted:
+  record-only). Completing a pending close ignores the run's R8
   evaluation status (the resolution was confirmed on a prior determinate run); a fact present
   again while `resolving` completes the old lifecycle first — its new issue opens next run.
 - `open` → `dismissed` — apply found the issue human-closed while the fact is STILL stale:
@@ -55,6 +59,11 @@ One entry per mirrored fact. File: `version: v1`, records sorted by pin key (det
   (`open`) mirror at apply time — including up-to-date rows whose upstream never moved
   (round 2 P2-1; R4) — and likewise a deleted issue of a still-stale up-to-date mirror
   starts a new lifecycle.
+- `open` → `dismissing` — the dismissal INTENT, persisted BEFORE the one continued-staleness
+  note (R10). `dismissing` → `dismissed` — the note confirmed (a retry marker-checks before
+  ever re-posting — OQ-C's "exactly one comment" survives any crash). `dismissing` →
+  `resolved` — the fact resolved while the confirm was pending: record-only, the moot note is
+  never posted late.
 - `dismissed` → `resolved` — the fact later resolves: record-only (no comment on a closed issue).
 - `dismissed` stays `dismissed` on further upstream movement (R5): quiet.
 - `resolved` records are retained (audit); a NEW staleness of the same pin key after resolution
@@ -72,9 +81,9 @@ Ordered rows (sorted by pin key), each `(fact-or-record, disposition, detail)`:
 
 | Disposition | Trigger (offline) | Apply action (networked) |
 |---|---|---|
-| `create` | fact with no mirror record (or record in `resolved`) | `create` issue → record `open` |
+| `create` | fact with no mirror record (or record in `resolved`); or a `creating` intent with the fact still present (R10 recovery) | record `creating` intent → `create` issue → record `open`; recovery first probes `find_by_marker` (found → adopt, never a duplicate) |
 | `update` | fact + `open` record, content state moved | reality-check → `update_body` (or → dismissed path) |
-| `resolve` | `open` record whose fact is absent from current facts **and freshness was determinately evaluated this run (R8)**; or a `resolving` record (pending close, any evaluation status — R9) | reality-check → audit comment → record `resolving` → `close` → `resolved` (record-only if human-closed/deleted; a `resolving` record never re-comments) |
+| `resolve` | `open`/`dismissed`/`dismissing` record whose fact is absent from current facts **and freshness was determinately evaluated this run (R8)**; or a `resolving`/`creating` record (pending recovery, any evaluation status — R9/R10) | reality-check → record `resolving` intent → audit comment → `close` → `resolved` (record-only if human-closed/deleted/superseded; recovery marker-checks before re-commenting; a `creating` record is adopted by marker or its intent cleared) |
 | `up-to-date` | fact + `open` record, content state unchanged; or `dismissed` record still stale | live (`open`) mirrors: reality-check (`get_state`) → unchanged: none; human-closed + still stale: respect-and-note (`dismissed`); deleted + still stale: create (new lifecycle). Dismissed/resolved rows: none |
 | `skip` | emitter not enabled (dry-run); row excluded with reason; or a live mirror whose fact is absent while freshness was NOT evaluated (check disabled / malformed pin file / indeterminate / citation failing resolution — R8: `freshness not evaluated — mirror preserved`, never a resolve) | none |
 
@@ -93,6 +102,11 @@ failure at row K leaves rows <K recorded exactly (FR-009 partial-success contrac
 
 ## IssuesConfig (`scripts/config.py`, pydantic v2, `extra="forbid"`)
 
+**Serialization twin (round 3 P2-1)**: `install.config_to_yaml` — the one
+GovernanceConfig→YAML serializer, reused by `sync --apply` — emits the `issues:` section
+whenever it differs from the default (omitted at the default: absent ≡ disabled), so a config
+rewrite can never silently disable the mirror or drop `repository`/`labels`.
+
 | Field | Type | Default | Rule |
 |---|---|---|---|
 | `enabled` | `bool` | `False` | absent section ≡ disabled |
@@ -107,6 +121,8 @@ every existing config file stays valid.
 | Method | Contract |
 |---|---|
 | `get_state(repo, number) -> str` | `open` \| `closed`; failure → `EmissionError` |
+| `find_by_marker(repo, marker) -> int \| None` | ONE bounded repo-scoped search for the deterministic body marker (R10 recovery); failure → `EmissionError` |
+| `has_comment_marker(repo, number, marker) -> bool` | ONE bounded issue-scoped comment scan for the marker (R10 recovery); failure → `EmissionError` |
 | `create(repo, title, body, labels) -> int` | returns issue number |
 | `update_body(repo, number, body) -> None` | overwrite body (emitter owns it, D5) |
 | `comment(repo, number, body) -> None` | append comment (audit / continued-staleness note) |

@@ -187,6 +187,12 @@ def config_to_yaml(cfg: GovernanceConfig) -> str:
         "citation_keys": cfg.citation_keys.model_dump(),
         "checks": cfg.checks.model_dump(),
     }
+    # Slice 007: the issues mirror's opt-in section. Serialized whenever non-default
+    # so a config rewrite (sync --apply reuses this serializer) can never silently
+    # disable the emitter or drop its repository/labels; omitted at the default —
+    # "absent section ≡ disabled" is the section's documented semantic.
+    if cfg.issues != type(cfg.issues)():
+        d["issues"] = cfg.issues.model_dump()
     return yaml.safe_dump(d, sort_keys=False, default_flow_style=False)
 
 

@@ -91,9 +91,17 @@ The tracker is unreachable, the operator's credential is missing, or the API rat
 - Config enables the emitter but names no tracker repository: config validation error at load time, before any planning.
 - Rate limiting mid-run: the failed emission is reported, successful ones are recorded, re-run resumes (US4 scenario 3).
 - The close fails AFTER the resolution's audit comment posted (rate limit, transient error):
-  the sidecar records the intermediate `resolving` state between the two mutations, so the
-  retry completes the close without re-posting the comment — resumable idempotency at
-  sub-row granularity (FR-009), and never a closed issue without its audit trail.
+  the sidecar's `resolving` intent state lets the retry marker-check the comment and complete
+  only the close — resumable idempotency at sub-row granularity (FR-009), and never a closed
+  issue without its audit trail.
+- The sidecar write fails AFTER a remote effect (issue created, note posted) — disk full,
+  permissions: the persisted intent state (`creating`/`dismissing`/`resolving`, written BEFORE
+  the effect) makes the retry reconcile with ONE bounded marker read instead of duplicating —
+  no duplicate issue, no double-posted comment; an intent whose effect provably never happened
+  is cleared, never left as a ghost record.
+- A very long namespace/value/citing path would push the title past GitHub's 256-character
+  limit: the title is hard-capped deterministically (fixed ellipsis); the full identity always
+  lives in the body fields and the marker.
 - Freshness was NOT determinately evaluated this run (the `citations_fresh` check is disabled, the pin file is malformed, an evaluation is indeterminate, or a citation fails resolution): the absence of a fact is “not evaluated”, never “confirmed resolved” — no mirror is resolved that run. Each preserved mirror surfaces as an explicit `skip (freshness not evaluated — mirror preserved)` plan row — never a silent omission, never a close: a disabled check must never look identical to a resolved world.
 
 ## Requirements *(mandatory)*
