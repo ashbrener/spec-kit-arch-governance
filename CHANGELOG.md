@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-08-03
+
+**issues** (slice `specs/007-issue-emitter/`) — the visibility slice spec 006 deferred: an
+**optional, default-disabled** emitter mirrors validated staleness facts (determinate
+`citations_fresh` failures from the one validate engine) into GitHub issues. Emitter only — no
+new detection, no diff classification, and the enforcement path (gate, blocking-flip guard) is
+untouched by construction: the emitter is a sibling consumer of the same engine run, registered
+in **no lifecycle hook**. No contract change (`vocabulary.json` stays `0.3.0`; the mirror
+sidecar is writer-internal, the pins-file precedent).
+
+### Added
+- **Structured staleness facts** — the engine's stale-pin branch attaches a `StalenessFact` (relation, value, citing file, cited artifact, pinned digest + date, current digest) to the failure `Issue` it already emits (additive, default-`None`): one engine, two consumers — the fact set and the finding set can never diverge.
+- **An `issues` verb** (`scripts/issues.py`, `commands/issues.md`, `speckit.arch-governance.issues`) — the sync/repin CLI contract, third occurrence: **dry-run by default and fully offline** (the deterministic per-fact plan: create / update / resolve / up-to-date / skip, diffed against the local sidecar — zero network by construction); `--apply` is the only networked mode. Exit codes: 0 plan/success (incl. the not-enabled no-op, so CI can call unconditionally), 1 emission failure (succeeded rows recorded; re-runs resume), 2 usage/config.
+- **A tracked mirror sidecar `.spec-arch-issues.yml`** — per mirrored fact: identity (the pin key), issue reference, last-emitted content state, status (`open`/`resolved`/`dismissed`). Written ONLY by `issues --apply`, atomically after EACH successful emission (a partial apply records exactly what succeeded); absent → fresh adoption, present-but-broken → typed error, exit 2, no emission. Tracked in git (its history is the emission audit trail); `export-ignore`d like the pins file.
+- **Idempotent per-fact lifecycle** (identity = the pin key): N staleness facts ⇒ exactly N issues; re-runs create nothing; a second upstream movement updates the SAME issue; resolution (repin / upstream revert / citation removed) **closes the issue with an audit comment naming what resolved it**; a human-closed-but-still-stale issue is **respected and noted** — exactly one continued-staleness comment, recorded `dismissed`, never re-opened, and further movement stays quiet; a resolved pin key going stale again starts a NEW lifecycle. The emitter never deletes an issue.
+- **The transport seam** — the narrow `IssueTransport` protocol; production `GhTransport` shells out to the operator's ambient-credentialed `gh api` (zero new runtime deps, no token handling in-repo; a missing `gh` is an apply-time failure with an actionable message). Every failure is a typed `EmissionError` that fails only the emitter's own run: validate and gate are **byte-identical** with the mirror enabled, disabled, or mid-failure (verified by tests, alongside the unmodified pre-007 suite).
+- **Opt-in config** — an additive `issues:` section (`enabled` default false; `repository: owner/name` REQUIRED when enabled — explicit, never inferred from git remotes; optional `labels` applied at create only), strictly validated. Absent section ≡ disabled: byte-identical pre-007 behavior and zero network anywhere.
+
+### Changed
+- Extension manifest version `1.1.0` → `1.2.0` (a sixth command; additive — hooks unchanged).
+- README, DESIGN §7, `config.example.yml` document the issues mirror (opt-in config, CI pattern `validate` → `issues --apply`, lifecycle semantics, the sidecar).
+
 ## [1.1.0] — 2026-08-03
 
 **citations_fresh** (slice `specs/006-citations-fresh/`) — closes the reverse-propagation gap the
