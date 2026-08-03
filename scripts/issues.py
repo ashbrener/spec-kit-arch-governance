@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import shlex
 import json
 import os
 import re
@@ -322,6 +323,23 @@ def _marker(namespace: str, key: P.PinKey, lifecycle: int) -> str:
             f"key={key[0]}|{key[1]}|{key[2]} lifecycle={lifecycle} -->")
 
 
+def _record_marker(namespace: str, record: MirrorRecord) -> str:
+    """The marker for a RECORD-driven emission (round 8 P2-1): the load-bearing
+    token comes from the PERSISTED record — the same value every recovery check
+    matches — never recomputed from live (mutable) config, so check and post share
+    one token source BY CONSTRUCTION. Every comment renderer reachable from a
+    recovery branch takes the record, not raw key/lifecycle, so a future call site
+    cannot pick the wrong source. The namespace prose in the marker is cosmetic
+    forensics (the token alone is matched); only the token must be the posted one.
+    Computing from live config is the fallback solely for a token-less settled
+    record — structurally unreachable for intent-driven paths (the loader requires
+    the token on intents)."""
+    token = record.token or _search_token(namespace, record.key, record.lifecycle)
+    return (f"<!-- {namespace}-governance issues v1 token={token} "
+            f"key={record.citing}|{record.relation}|{record.value} "
+            f"lifecycle={record.lifecycle} -->")
+
+
 # GitHub caps issue titles at 256 characters (bodies at 65536 — our bodies are a few
 # hundred bytes, ample headroom, and they carry the FULL identity + marker).
 _TITLE_MAX = 256
@@ -367,7 +385,7 @@ def render_body(fact: StalenessFact, namespace: str, lifecycle: int = 1) -> str:
         f"from the governed repo's root:\n"
         f"\n"
         f"    uv run python .specify/extensions/arch-governance/scripts/repin.py . "
-        f"'{fact.value}' --apply\n"
+        f"{shlex.quote(fact.value)} --apply\n"
         f"\n"
         f"This body is owned by the issues emitter and is overwritten when the upstream "
         f"state moves again; comments are yours. Closing this issue by hand is respected "
@@ -378,24 +396,28 @@ def render_body(fact: StalenessFact, namespace: str, lifecycle: int = 1) -> str:
 
 
 def render_resolution_comment(record: MirrorRecord, detail: str, namespace: str) -> str:
-    """The audit comment that closes a resolved mirror (OQ-B): names what resolved it."""
+    """The audit comment that closes a resolved mirror (OQ-B): names what resolved
+    it. Marker from the RECORD (round 8 P2-1): the posted token is the stored one."""
     return (
         f"Resolved: `{record.relation} '{record.value}'` in `{record.citing}` "
         f"({detail or 'no longer stale'}). Closing this mirror issue.\n"
         f"\n"
-        f"{_marker(namespace, record.key, record.lifecycle)}\n"
+        f"{_record_marker(namespace, record)}\n"
     )
 
 
-def render_dismissal_comment(fact: StalenessFact, namespace: str, lifecycle: int = 1) -> str:
-    """The single continued-staleness note on a human-closed-but-stale issue (OQ-C)."""
+def render_dismissal_comment(fact: StalenessFact, namespace: str,
+                             record: MirrorRecord) -> str:
+    """The single continued-staleness note on a human-closed-but-stale issue (OQ-C).
+    Takes the RECORD, not raw key/lifecycle (round 8 P2-1): the marker's token is
+    the persisted one, so the retry's check finds exactly what this posted."""
     return (
         f"This issue was closed while `{fact.relation} '{fact.value}'` in `{fact.citing}` "
         f"is still stale (pinned `{P.abbrev(fact.pinned_digest)}`, current "
         f"`{P.abbrev(fact.current_digest)}`). Respecting the closure — recorded as "
         f"dismissed; the emitter will not comment again and will never re-open this issue.\n"
         f"\n"
-        f"{_marker(namespace, fact.key, lifecycle)}\n"
+        f"{_record_marker(namespace, record)}\n"
     )
 
 
@@ -851,11 +873,12 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
         # last-emitted (R5): the body was not updated. R10 intent discipline: the
         # `dismissing` intent is persisted BEFORE the note, so an interrupted
         # confirm write can never cause a double post (retry marker-checks).
-        tok = _search_token(ns, row.key, rec.lifecycle)
-        record(replace(rec, status="dismissing", token=tok))
-        transport.comment(rec.repo, rec.issue,
-                          render_dismissal_comment(f, ns, rec.lifecycle))
-        record(replace(rec, status="dismissed", token=tok))
+        intent = replace(rec, status="dismissing",
+                         token=_search_token(ns, row.key, rec.lifecycle))
+        record(intent)
+        transport.comment(intent.repo, intent.issue,
+                          render_dismissal_comment(f, ns, intent))
+        record(replace(intent, status="dismissed"))
         report.append(_audit("dismissed", row, rec.issue,
                              "closed by operator while still stale — noted, "
                              "will not re-open"))
@@ -866,8 +889,10 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
         # R10 recovery: the note may or may not have posted — ONE bounded,
         # issue-scoped marker check decides; never a second note.
         if not transport.has_comment_marker(rec.repo, rec.issue, rec.token):
+            # round 8 P2-1: post the SAME token the check just missed — from the
+            # record, never recomputed (a namespace flip must not split them)
             transport.comment(rec.repo, rec.issue,
-                              render_dismissal_comment(f, ns, rec.lifecycle))
+                              render_dismissal_comment(f, ns, rec))
         record(replace(rec, status="dismissed"))
         report.append(_audit("dismissed", row, rec.issue, note))
 
@@ -1041,8 +1066,11 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                     record(replace(rec, status="resolving",
                                    token=_search_token(ns, row.key, rec.lifecycle)))
                     transport.comment(rec.repo, rec.issue,
-                                      render_resolution_comment(rec, row.detail, ns))
+                                      render_resolution_comment(mirrors[row.key],
+                                                                row.detail, ns))
                 elif not transport.has_comment_marker(rec.repo, rec.issue, rec.token):
+                    # round 8 P2-1: the posted marker carries the STORED token —
+                    # the very value the check above just looked for
                     transport.comment(rec.repo, rec.issue,
                                       render_resolution_comment(rec, row.detail, ns))
                 transport.close(rec.repo, rec.issue)

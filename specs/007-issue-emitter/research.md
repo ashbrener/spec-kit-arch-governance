@@ -104,6 +104,12 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   namespace/value/citing can never fail the create API call. Same fact ⇒ same bytes still
   holds; the FULL identity always lives in the body fields and the marker (bodies cap at
   65536 — ours are a few hundred bytes, ample headroom).
+- **Remedy shell-quoting (review round 8, P2-2)**: every dynamic value substituted into the
+  rendered copy-pasteable command goes through the serializer for that language —
+  `shlex.quote` (the 018 yaml_quote doctrine in shell form). A citation value containing a
+  single quote (legal in front matter) previously rendered an invalid — or injectable —
+  command. `shlex.quote` is pure, so D5 determinism holds, and it leaves safe values unquoted,
+  so plain selectors render byte-identically to their raw form.
 
 ## R7 — CLI contract and exit codes
 
@@ -281,6 +287,14 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   namespace changes. The loader REQUIRES the token on intent-status records (the
   no-lenient-default precedent); settled records may retain it for forensics — nothing reads
   it there.
+- **Round 8 P2-1 — check and post share ONE token source, structurally**: R7 stored the token
+  but recovery comments still RENDERED their marker from live config — namespace drift plus a
+  state-write failure after the post meant the next retry searched the stored token, missed
+  its own (new-namespace) comment, and duplicated the note. Every comment renderer reachable
+  from a recovery branch now takes the RECORD (`_record_marker`: the marker's token is
+  `record.token`), so a call site cannot pick the wrong source; fresh paths persist the intent
+  record first and render from it, making posted bytes equal checked bytes by construction.
+  The namespace prose in the marker stays cosmetic forensics — only the token is matched.
 
 ## R11 — Resolution-detail classification via the current citation set (review round 3, P2-3)
 

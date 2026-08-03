@@ -1123,6 +1123,142 @@ def test_gh_transport_recovery_reads_map_failures_to_emission_error(monkeypatch)
     assert "rate limit" in str(e2.value)
 
 
+# ═══ Review round 8 — P2-1: recovery comments POST the stored token they CHECK ═══
+# R7 was a half-fix: recovery checked has_comment_marker(rec.token) but rendered
+# the comment via live config, embedding a RECOMPUTED marker. Namespace drift + a
+# state-write failure after the post → the next retry misses its own comment and
+# duplicates. Check and post must share ONE token source: the persisted record.
+
+def test_namespace_flip_mid_dismissing_recovery_posts_stored_token(tmp_path, monkeypatch):
+    src, build, k = _mirrored_stale(tmp_path)          # open mirror #101, still stale
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    # run 1: dismissal intent persists, the note itself FAILS to post
+    t1 = FakeTransport()
+    t1.states[101] = "closed"
+    t1.fail["comment"] = ISS.EmissionError("HTTP 502")
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t1)
+    stored = ISS.load_mirrors(build)[k].token
+    assert stored == ISS._search_token("API", k, 1)
+    _flip_namespace(build)                             # config mutates mid-intent
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    # run 2: the note posts, then the CONFIRM write fails
+    real = ISS.write_mirrors
+    n = {"count": 0}
+
+    def flaky(root_, records):
+        n["count"] += 1
+        if n["count"] == 1:                            # the dismissed-confirm write
+            raise OSError("disk full")
+        return real(root_, records)
+
+    monkeypatch.setattr(ISS, "write_mirrors", flaky)
+    t2 = FakeTransport()
+    t2.states[101] = "closed"
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t2)
+    posted = t2.posted[101]
+    assert len(posted) == 1
+    assert f"token={stored}" in posted[0]              # posted marker == STORED token bytes
+    monkeypatch.setattr(ISS, "write_mirrors", real)
+    # run 3: the marker-check FINDS the posted note via the same stored token
+    t3 = FakeTransport()
+    t3.states[101] = "closed"
+    t3.seeded_comments[101] = list(posted)
+    rows, report, _ = _apply(build, cfg, root, facts, t3)
+    assert t3.of("comment") == []                      # ZERO duplicate notes
+    assert _mirrors(build)[k].status == "dismissed"
+
+
+def test_namespace_flip_mid_resolving_recovery_posts_stored_token(tmp_path, monkeypatch):
+    src, build, k = _mirrored_stale(tmp_path)
+    assert R.main([str(build), "--apply"]) == 0        # the fact resolves
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    # run 1: resolving intent persists, the audit comment itself FAILS to post
+    t1 = FakeTransport()
+    t1.states[101] = "open"
+    t1.fail["comment"] = ISS.EmissionError("HTTP 502")
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t1)
+    rec = ISS.load_mirrors(build)[k]
+    assert rec.status == "resolving"
+    stored = rec.token
+    assert stored == ISS._search_token("API", k, 1)
+    _flip_namespace(build)                             # config mutates mid-intent
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    # run 2: comment + close succeed, the RESOLVED confirm write fails
+    real = ISS.write_mirrors
+    n = {"count": 0}
+
+    def flaky(root_, records):
+        n["count"] += 1
+        if n["count"] == 1:                            # the resolved-confirm write
+            raise OSError("disk full")
+        return real(root_, records)
+
+    monkeypatch.setattr(ISS, "write_mirrors", flaky)
+    t2 = FakeTransport()
+    t2.states[101] = "open"
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t2)
+    posted = t2.posted[101]
+    assert len(posted) == 1
+    assert f"token={stored}" in posted[0]              # posted marker == STORED token bytes
+    monkeypatch.setattr(ISS, "write_mirrors", real)
+    # run 3: still resolving; marker-check finds the comment — close only, no re-post
+    t3 = FakeTransport()
+    t3.states[101] = "open"
+    t3.seeded_comments[101] = list(posted)
+    rows, report, _ = _apply(build, cfg, root, facts, t3)
+    assert t3.of("comment") == []                      # ZERO duplicate audit comments
+    assert len(t3.of("close")) == 1
+    assert _mirrors(build)[k].status == "resolved"
+
+
+# ═══ Review round 8 — P2-2: the remedy selector is shell-quoted ═══
+
+def _fact_with_value(value):
+    return ISS.StalenessFact(relation="derived_from", value=value,
+                             citing="specs/001-x/spec.md", cited_display="d",
+                             pinned_digest="sha256:" + "a" * 64, pinned_date="2026-08-03",
+                             current_digest="sha256:" + "b" * 64)
+
+
+def test_remedy_selector_with_single_quote_renders_valid_shell(tmp_path):
+    import shlex
+    fact = _fact_with_value("docs:o'brien-model")
+    body = ISS.render_body(fact, "API")
+    line = next(ln for ln in body.splitlines() if "repin.py" in ln)
+    toks = shlex.split(line.strip())                   # parses cleanly under POSIX rules
+    assert toks[:3] == ["uv", "run", "python"]
+    assert toks[3].endswith("repin.py") and toks[4] == "."
+    assert toks[5] == "docs:o'brien-model"             # round-trips intact
+    assert toks[6] == "--apply"
+    assert shlex.quote("docs:o'brien-model") in body   # the exact quoted bytes
+    assert ISS.render_body(fact, "API") == body        # shlex.quote is pure — D5 holds
+
+
+def test_remedy_selector_hostile_value_is_inert(tmp_path):
+    import shlex
+    hostile = "docs:x'; rm -rf ~'"
+    fact = _fact_with_value(hostile)
+    body = ISS.render_body(fact, "API")
+    line = next(ln for ln in body.splitlines() if "repin.py" in ln)
+    toks = shlex.split(line.strip())
+    assert toks[5] == hostile                          # ONE inert argument — no injection
+    assert toks[6] == "--apply" and len(toks) == 7
+    assert shlex.quote(hostile) in body                # the exact quoted bytes
+    assert "; rm" not in " ".join(toks[:5])            # nothing leaks into command position
+
+
 # ═══ Review round 7 — P2-1: search miss falls back to the real-time recent list ═══
 
 def test_search_lag_recovery_falls_back_to_recent_list(tmp_path, monkeypatch):
@@ -2033,14 +2169,18 @@ def test_unpinned_and_orphan_notes_do_not_impair_evaluation(tmp_path):
 # ═══ Review round 1 — P2: the remedy targets the INSTALLED layout ═══
 
 def test_body_remedy_renders_the_registered_command_and_installed_path(tmp_path):
+    import shlex
     src, build = _domain(tmp_path)
     _pin(build)
     _go_stale(src)
     fact = _facts(build)[0]
     body = ISS.render_body(fact, "API")
     assert "/speckit.arch-governance.repin" in body    # the command consumers actually have
+    # round 8 P2-2: the selector goes through shlex.quote — a safe value stays
+    # UNQUOTED (shlex.quote is a no-op on it), so the plain form is the contract
+    assert shlex.quote("docs:005-fund-model") == "docs:005-fund-model"
     assert ("uv run python .specify/extensions/arch-governance/scripts/repin.py . "
-            "'docs:005-fund-model' --apply") in body   # fallback, correct for installed layout
+            "docs:005-fund-model --apply") in body     # fallback, correct for installed layout
     # never the repo-root path a consumer does not have
     assert "python scripts/repin.py" not in body
     assert ISS.render_body(fact, "API") == body        # determinism preserved (D5)
