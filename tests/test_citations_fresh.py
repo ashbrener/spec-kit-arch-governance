@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -361,6 +362,74 @@ def test_incomplete_pin_records_route_to_malformed_never_fresh(tmp_path):
         # and repin does NOT treat the damaged record as up-to-date — it plans the rebuild
         plan = R.repin_plan(cfg, root)
         assert plan.rebuild and not [e for e in plan.entries if e.action == "up-to-date"], name
+
+
+def test_duplicate_pin_identities_are_malformed_never_fresh(tmp_path):
+    """Two valid records with the SAME (citing, relation, value) key — a classic merge
+    outcome — make the file ambiguous. Silent last-wins could report fresh off the
+    surviving duplicate, and an all-up-to-date --apply would never repair the file.
+    Duplicates are detected on load → the malformed path, and repin plans the rebuild."""
+    _, build = _domain(tmp_path)
+    _pin(build)
+    data = yaml.safe_load((build / P.PIN_FILE).read_text())
+    dup = dict(next(e for e in data["pins"] if e["relation"] == "derived_from"))
+    dup["digest"] = "sha256:" + "b" * 64          # same identity, different (valid) digest
+    data["pins"].insert(0, dup)                    # last-wins would pick the CURRENT digest
+    (build / P.PIN_FILE).write_text(yaml.safe_dump(data, sort_keys=False))
+    try:
+        P.load_pins(build)
+        assert False, "a duplicated pin identity must raise PinLoadError"
+    except P.PinLoadError:
+        pass
+    cfg, root, issues = _validate(build)
+    assert _fresh_fails(issues) == []              # never a masked-fresh or stale verdict
+    notes = _fresh(issues)
+    malformed = [i for i in notes if P.PIN_FILE in i.detail]
+    assert len(malformed) == 1 and malformed[0].severity == "note"
+    assert sum("is unpinned" in i.detail for i in notes) == 2   # nothing reported fresh
+    plan = R.repin_plan(cfg, root)                 # the rebuild IS planned (apply-worthy)
+    assert plan.rebuild and not [e for e in plan.entries if e.action == "up-to-date"]
+    assert R.main([str(build), "--apply"]) == 0    # and it repairs the ambiguous file
+    assert len(P.load_pins(build)) == 2
+    _, _, issues = _validate(build)
+    assert _fresh(issues) == []
+
+
+def test_non_scalar_pin_fields_are_malformed_and_selector_refused(tmp_path):
+    """Merge damage can leave a list/mapping where a scalar belongs. str()-coercion
+    would fabricate nonempty strings that pass shape validation, surfacing as misleading
+    unpinned + orphan outcomes — and a selector-scoped repin would NOT be refused over
+    what is really an unparseable set. Field types are validated before construction."""
+    good_digest = "sha256:" + "a" * 64
+    cases = {
+        "list-citing": ("- citing: [specs/001-derived/spec.md]\n"
+                        "  relation: derived_from\n  value: docs:005-fund-model\n"
+                        "  path: ../docs/specs/005-fund-model/spec.md\n"
+                        f"  digest: {good_digest}\n  pinned: '2026-08-03'\n"),
+        "mapping-path": ("- citing: specs/001-derived/spec.md\n"
+                         "  relation: derived_from\n  value: docs:005-fund-model\n"
+                         "  path: {ours: a.md, theirs: b.md}\n"
+                         f"  digest: {good_digest}\n  pinned: '2026-08-03'\n"),
+    }
+    for name, record in cases.items():
+        _, build = _domain(tmp_path / name)
+        body = "version: v1\npins:\n" + record
+        (build / P.PIN_FILE).write_text(body)
+        try:
+            P.load_pins(build)
+            assert False, f"{name}: a non-scalar field must raise PinLoadError"
+        except P.PinLoadError:
+            pass
+        _, _, issues = _validate(build)
+        notes = _fresh(issues)
+        malformed = [i for i in notes if P.PIN_FILE in i.detail]
+        assert len(malformed) == 1 and malformed[0].severity == "note", name
+        assert not [i for i in notes if "orphan" in i.detail], name   # no misleading orphan
+        assert sum("is unpinned" in i.detail for i in notes) == 2, name
+        assert _fresh_fails(issues) == [], name
+        # a selector over such a file is refused, exactly like any other malformed set
+        assert R.main([str(build), "CORE-ADR-001", "--apply"]) == 2, name
+        assert (build / P.PIN_FILE).read_text() == body, name         # nothing written
 
 
 # ── US4: enforcement + fail-safe ──

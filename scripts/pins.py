@@ -17,6 +17,7 @@ compare, never to update.
 
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
 import os
 import re
@@ -82,6 +83,21 @@ class PinLoadError(Exception):
     """The pin file exists but cannot be parsed into pins (absent ≠ present-but-broken)."""
 
 
+def _scalar(e: dict, name: str) -> str:
+    """A record field must be a SCALAR string as authored. Merge damage can leave a
+    list/mapping where a scalar belongs — str()-coercing those would fabricate nonempty
+    strings that pass shape validation and surface as misleading unpinned/orphan
+    outcomes instead of the single malformed note. `pinned` may parse as a YAML date
+    (unquoted by a hand edit); that is normalized, not rejected."""
+    v = e.get(name)
+    if isinstance(v, str):
+        return v
+    if name == "pinned" and isinstance(v, _dt.date):
+        return v.isoformat()
+    raise PinLoadError(f"pin record field {name!r} must be a string, "
+                       f"got {type(v).__name__} (merge-damaged?)")
+
+
 def _validate_record(p: Pin) -> None:
     """Every field of a pin record is REQUIRED with a valid shape (FR-003). A record with
     a valid digest but a missing/empty companion field must NOT be accepted with defaults:
@@ -131,21 +147,35 @@ def load_pins(repo_root) -> dict[PinKey, Pin]:
             # the writer never emits one, so its emptiness is corruption, not adoption.
             raise PinLoadError("pin file is empty — expected a pins document "
                                "(truncated or merge-damaged?)")
-        pins = [
-            # paths normalized on READ too, so an existing native-separator pin file
-            # (e.g. one written on Windows) still matches a POSIX scan
-            Pin(citing=_posix(e["citing"]), relation=str(e["relation"]), value=str(e["value"]),
-                path=_posix(e.get("path", "")), digest=str(e["digest"]),
-                pinned=str(e.get("pinned", "")))
-            for e in data["pins"]
-        ]
+        pins = []
+        for e in data["pins"]:
+            if not isinstance(e, dict):
+                raise PinLoadError(f"pin record must be a mapping, got {type(e).__name__} "
+                                   f"(merge-damaged?)")
+            # field TYPES validated before construction (scalars only); paths normalized
+            # on READ too, so an existing native-separator pin file (e.g. one written on
+            # Windows) still matches a POSIX scan
+            pins.append(Pin(citing=_posix(_scalar(e, "citing")),
+                            relation=_scalar(e, "relation"),
+                            value=_scalar(e, "value"),
+                            path=_posix(_scalar(e, "path")),
+                            digest=_scalar(e, "digest"),
+                            pinned=_scalar(e, "pinned")))
+        out: dict[PinKey, Pin] = {}
         for p in pins:
             _validate_record(p)
+            if p.key in out:
+                # Two records with the same identity (a classic merge outcome) make the
+                # file AMBIGUOUS: silent last-wins could report fresh off the surviving
+                # duplicate, and an all-up-to-date --apply would never repair the file.
+                raise PinLoadError(f"duplicate pin identity {p.key} — the file is "
+                                   f"ambiguous (merge artifact?); rebuild via repin")
+            out[p.key] = p
     except PinLoadError:
         raise
     except Exception as exc:
         raise PinLoadError(str(exc)) from exc
-    return {p.key: p for p in pins}
+    return out
 
 
 def pins_to_yaml(pins) -> str:

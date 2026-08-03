@@ -23,7 +23,12 @@ maintainers*, not as an interop promise.
   missing/empty required field or invalid shape — `citing`, `relation` (∈ derived_from|cites),
   `value`, `path`, `pinned` (YYYY-MM-DD) are ALL required: a record accepted with defaulted
   fields would read as fresh/up-to-date forever and the damage would never surface or be
-  repaired.
+  repaired. Also malformed: a NON-SCALAR field value (a list/mapping where a string belongs —
+  merge damage; str()-coercion would fabricate passing strings that surface as misleading
+  unpinned/orphan outcomes), and DUPLICATE pin identities (two records with the same key — a
+  classic merge outcome; silent last-wins could report fresh off the surviving duplicate while
+  an all-up-to-date `--apply` never repairs the ambiguity). One tolerance: an unquoted `pinned`
+  that YAML parses as a date is normalized back to `YYYY-MM-DD`, not rejected.
 
 ## Shape
 
