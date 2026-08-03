@@ -564,6 +564,187 @@ def test_resolved_mirror_going_stale_again_is_a_new_lifecycle(tmp_path):
     assert rec.issue != old_numbers[k]
 
 
+# ═══ Phase 5 — US3: resolution reflected, dismissal respected (T013/T014) ═══
+
+def _mirrored_stale(tmp):
+    """One mirrored stale fact (issue #101 open): (src, build, key)."""
+    src, build = _domain(tmp)
+    _pin(build)
+    _go_stale(src)
+    _enable(build)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    _apply(build, cfg, root, ISS.staleness_facts(issues), FakeTransport())
+    return src, build, ("specs/001-derived/spec.md", "derived_from", "docs:005-fund-model")
+
+
+def test_resolution_closes_with_audit_comment_naming_the_new_pin(tmp_path):
+    src, build, k = _mirrored_stale(tmp_path)
+    assert R.main([str(build), "--apply"]) == 0            # the author repins
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    assert facts == []                                     # fact gone from the engine
+    new_digest = P.load_pins(build)[k].digest
+    t = FakeTransport()
+    t.states[101] = "open"
+    rows, report, _ = _apply(build, cfg, root, facts, t)
+    assert [r.disposition for r in rows] == ["resolve"]
+    comments, closes = t.of("comment"), t.of("close")
+    assert len(comments) == 1 and len(closes) == 1
+    assert comments[0][2] == 101 and closes[0][2] == 101
+    assert P.abbrev(new_digest) in comments[0][3]          # names the resolution (OQ-B)
+    assert "repinned" in comments[0][3]
+    rec = _mirrors(build)[k]
+    assert rec.status == "resolved"
+    assert len(report) == 1 and "resolved" in report[0] and "#101" in report[0]
+    # no other issue is touched (SC-003): exactly get_state + comment + close
+    assert len(t.calls) == 3
+
+
+def test_dry_run_shows_resolve_without_performing_it(tmp_path, capsys):
+    src, build, k = _mirrored_stale(tmp_path)
+    assert R.main([str(build), "--apply"]) == 0
+    before = (build / ISS.MIRROR_FILE).read_bytes()
+    capsys.readouterr()
+    assert ISS.main([str(build)]) == 0                     # dry-run: no transport at all
+    out = capsys.readouterr().out
+    assert "resolve" in out and "no longer stale" in out
+    assert (build / ISS.MIRROR_FILE).read_bytes() == before
+    assert _mirrors(build)[k].status == "open"             # reconciliation not performed
+
+
+def test_human_closed_but_still_stale_is_respected_and_noted_once(tmp_path):
+    src, build, k = _mirrored_stale(tmp_path)
+    # upstream moves again (update due) but a human closed the issue meanwhile
+    (src / "specs" / "005-fund-model" / "spec.md").write_text(
+        UPSTREAM_SPEC.replace("v1", "v3"))
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    t = FakeTransport()
+    t.states[101] = "closed"
+    rows, report, _ = _apply(build, cfg, root, facts, t)
+    comments = t.of("comment")
+    assert len(comments) == 1                              # exactly ONE note (OQ-C)
+    assert "still stale" in comments[0][3]
+    assert t.of("update_body") == [] and t.of("close") == []
+    assert not any(c[0] not in ("get_state", "comment") for c in t.calls)  # never re-opened
+    rec = _mirrors(build)[k]
+    assert rec.status == "dismissed"
+    assert len(report) == 1 and "dismissed" in report[0]
+    assert "will not re-open" in report[0]                 # report line per CLI contract
+
+
+def test_human_closed_and_resolved_is_record_only(tmp_path):
+    src, build, k = _mirrored_stale(tmp_path)
+    assert R.main([str(build), "--apply"]) == 0            # resolved
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t = FakeTransport()
+    t.states[101] = "closed"                               # human already closed it
+    rows, report, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t)
+    assert t.of("comment") == [] and t.of("close") == []   # no comment on a closed issue
+    assert _mirrors(build)[k].status == "resolved"
+    assert len(report) == 1 and "recorded" in report[0] and "already closed" in report[0]
+
+
+def _dismissed(tmp):
+    """A dismissed mirror whose fact is still stale: (src, build, key)."""
+    src, build, k = _mirrored_stale(tmp)
+    (src / "specs" / "005-fund-model" / "spec.md").write_text(
+        UPSTREAM_SPEC.replace("v1", "v3"))
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t = FakeTransport()
+    t.states[101] = "closed"
+    _apply(build, cfg, root, ISS.staleness_facts(issues), t)
+    assert _mirrors(build)[k].status == "dismissed"
+    return src, build, k
+
+
+def test_dismissed_and_still_stale_stays_quiet(tmp_path):
+    src, build, k = _dismissed(tmp_path)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t = FakeTransport()
+    before = (build / ISS.MIRROR_FILE).read_bytes()
+    rows, report, mutated = _apply(build, cfg, root, ISS.staleness_facts(issues), t)
+    by_key = {r.key: r for r in rows}
+    assert by_key[k].disposition == "up-to-date"           # quiet
+    assert "dismissed" in by_key[k].detail
+    assert t.calls == [] and report == [] and not mutated
+    assert (build / ISS.MIRROR_FILE).read_bytes() == before
+
+
+def test_dismissed_stays_quiet_on_further_movement(tmp_path):
+    src, build, k = _dismissed(tmp_path)
+    (src / "specs" / "005-fund-model" / "spec.md").write_text(
+        UPSTREAM_SPEC.replace("v1", "v9"))                 # yet another movement (R5)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t = FakeTransport()
+    rows, report, mutated = _apply(build, cfg, root, ISS.staleness_facts(issues), t)
+    assert t.calls == [] and report == [] and not mutated  # no nagging by installment
+    assert _mirrors(build)[k].status == "dismissed"
+
+
+def test_dismissed_fact_resolving_is_record_only(tmp_path):
+    src, build, k = _dismissed(tmp_path)
+    assert R.main([str(build), "--apply"]) == 0            # the fact resolves
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t = FakeTransport()
+    rows, report, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t)
+    assert t.calls == []                                   # no comment on the closed issue
+    assert _mirrors(build)[k].status == "resolved"
+    assert len(report) == 1 and "recorded" in report[0] and "dismissed" in report[0]
+
+
+def test_deleted_issue_still_stale_becomes_new_lifecycle(tmp_path):
+    src, build, k = _mirrored_stale(tmp_path)
+    (src / "specs" / "005-fund-model" / "spec.md").write_text(
+        UPSTREAM_SPEC.replace("v1", "v3"))                 # update due
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t = FakeTransport()
+    t.states[101] = "missing"                              # deleted repo-side
+    t.next_number = 777
+    rows, report, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t)
+    assert len(t.of("create")) == 1                        # fresh issue, new lifecycle
+    rec = _mirrors(build)[k]
+    assert rec.status == "open" and rec.issue == 777
+    assert len(report) == 1 and "deleted repo-side" in report[0]   # surfaced explicitly
+
+
+def test_deleted_issue_and_resolved_is_record_only(tmp_path):
+    src, build, k = _mirrored_stale(tmp_path)
+    assert R.main([str(build), "--apply"]) == 0
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t = FakeTransport()
+    t.states[101] = "missing"
+    rows, report, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t)
+    assert t.of("create") == [] and t.of("comment") == [] and t.of("close") == []
+    assert _mirrors(build)[k].status == "resolved"
+    assert len(report) == 1 and "deleted repo-side" in report[0]   # never a crash
+
+
+def test_resolution_detail_distinguishes_repin_revert_and_removal(tmp_path):
+    src, build, k = _mirrored_stale(tmp_path)
+    rec = _mirrors(build)[k]
+    pins = P.load_pins(build)
+    # upstream reverted: pin digest unchanged, fact gone
+    assert "reverted" in ISS._resolution_detail(rec, pins)
+    # repinned: pin digest moved
+    assert R.main([str(build), "--apply"]) == 0
+    assert "repinned" in ISS._resolution_detail(rec, P.load_pins(build))
+    # citation/pin removed
+    assert "removed" in ISS._resolution_detail(rec, {})
+    # no pin knowledge at all (malformed pin file) → honest generic
+    assert ISS._resolution_detail(rec, None) == "no longer stale"
+
+
 # ═══ Phase 3 — US1: GhTransport asserted on command construction ONLY (T009) ═══
 
 def test_gh_transport_builds_gh_api_commands():
