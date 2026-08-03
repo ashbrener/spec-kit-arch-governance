@@ -384,7 +384,9 @@ def _stale_pair(tmp):
 
 def _apply(build, cfg, root, facts, transport, mirrors=None):
     mirrors = dict(ISS.load_mirrors(root) if mirrors is None else mirrors)
-    rows = ISS.issues_plan(facts, mirrors, P.load_pins(root))
+    issues, _ = V.validate(cfg, root)                      # same-run evaluation signal (R8)
+    evaluated = ISS.freshness_evaluated(cfg, issues)
+    rows = ISS.issues_plan(facts, mirrors, P.load_pins(root), evaluated)
     report: list[str] = []
     mutated = ISS.apply_plan(rows, mirrors, cfg, root, transport, report)
     return rows, report, mutated
@@ -743,6 +745,127 @@ def test_resolution_detail_distinguishes_repin_revert_and_removal(tmp_path):
     assert "removed" in ISS._resolution_detail(rec, {})
     # no pin knowledge at all (malformed pin file) → honest generic
     assert ISS._resolution_detail(rec, None) == "no longer stale"
+
+
+# ═══ Review round 1 — P1: absent-vs-not-evaluated (R8) ═══
+# "No facts" has two meanings: CONFIRMED resolution (the check ran determinately and
+# the fact is gone) vs NOT EVALUATED (check disabled, malformed pin file, indeterminate
+# skips, a citation failing resolution). Only the first may resolve a mirror.
+
+def _disable_freshness(build):
+    f = build / ".spec-arch-governance.yml"
+    f.write_text(f.read_text().replace(
+        "adr_immutability: false", "adr_immutability: false, citations_fresh: false"))
+
+
+def test_disabled_check_preserves_open_mirrors_with_explicit_skip(tmp_path, capsys):
+    src, build, k = _mirrored_stale(tmp_path)          # open mirror #101, still stale
+    _disable_freshness(build)                          # the fact vanishes — NOT resolved
+    before = (build / ISS.MIRROR_FILE).read_bytes()
+    capsys.readouterr()
+    assert ISS.main([str(build)]) == 0                 # dry-run SAYS why nothing happens
+    out = capsys.readouterr().out
+    assert "skip" in out and "freshness not evaluated" in out and "preserved" in out
+    assert "RESULT: create 0 / update 0 / resolve 0 / up-to-date 0 / skip 1" in out
+    t = FakeTransport()
+    assert ISS.main([str(build), "--apply"], transport=t) == 0
+    assert t.calls == []                               # no close, no comment — nothing
+    assert (build / ISS.MIRROR_FILE).read_bytes() == before
+    assert _mirrors(build)[k].status == "open"         # the mirror survives the outage
+
+
+def test_malformed_pin_file_preserves_open_mirrors(tmp_path, capsys):
+    src, build, k = _mirrored_stale(tmp_path)
+    (build / P.PIN_FILE).write_text("{{{ not yaml")    # every pin collapses to unpinned
+    before = (build / ISS.MIRROR_FILE).read_bytes()
+    capsys.readouterr()
+    assert ISS.main([str(build)]) == 0
+    out = capsys.readouterr().out
+    assert "freshness not evaluated" in out and "resolve 0" in out
+    t = FakeTransport()
+    assert ISS.main([str(build), "--apply"], transport=t) == 0
+    assert t.calls == []
+    assert (build / ISS.MIRROR_FILE).read_bytes() == before
+    assert _mirrors(build)[k].status == "open"
+    # …and a malformed MIRROR file stays the distinct exit-2 path
+    (build / ISS.MIRROR_FILE).write_text("{{{ not yaml")
+    assert ISS.main([str(build)]) == 2
+
+
+def test_indeterminate_evaluation_preserves_open_mirrors(tmp_path):
+    src, build, k = _mirrored_stale(tmp_path)
+    (src / "specs" / "005-fund-model" / "spec.md").chmod(0)   # unreadable → indeterminate
+    try:
+        cfg, root = V.load_config(build)
+        issues, _ = V.validate(cfg, root)
+        facts = ISS.staleness_facts(issues)
+        assert facts == []                             # no fact — but NOT resolved
+        assert not ISS.freshness_evaluated(cfg, issues)
+        t = FakeTransport()
+        rows, report, mutated = _apply(build, cfg, root, facts, t)
+        by_key = {r.key: r for r in rows}
+        assert by_key[k].disposition == "skip"
+        assert "freshness not evaluated" in by_key[k].detail
+        assert t.calls == [] and not mutated
+        assert _mirrors(build)[k].status == "open"
+    finally:
+        (src / "specs" / "005-fund-model" / "spec.md").chmod(0o644)
+
+
+def test_unresolvable_citation_preserves_open_mirrors(tmp_path):
+    import shutil
+    src, build, k = _mirrored_stale(tmp_path)
+    shutil.rmtree(src)                                 # upstream gone: citations_resolve
+    cfg, root = V.load_config(build)                   # fails; freshness stays silent
+    issues, _ = V.validate(cfg, root)
+    assert ISS.staleness_facts(issues) == []
+    assert not ISS.freshness_evaluated(cfg, issues)    # absence is unowned, not resolved
+    t = FakeTransport()
+    rows, report, mutated = _apply(build, cfg, root, [], t)
+    assert {r.disposition for r in rows} == {"skip"}
+    assert t.calls == [] and not mutated
+    assert _mirrors(build)[k].status == "open"
+
+
+def test_determinate_run_still_resolves_when_evaluated(tmp_path):
+    src, build, k = _mirrored_stale(tmp_path)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    assert ISS.freshness_evaluated(cfg, issues)        # clean determinate run
+    assert R.main([str(build), "--apply"]) == 0        # genuine resolution (repinned)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    assert ISS.freshness_evaluated(cfg, issues)
+    t = FakeTransport()
+    t.states[101] = "open"
+    rows, _, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t)
+    assert [r.disposition for r in rows] == ["resolve"]   # confirmed resolution still works
+    assert len(t.of("close")) == 1
+    assert _mirrors(build)[k].status == "resolved"
+
+
+def test_unpinned_and_orphan_notes_do_not_impair_evaluation(tmp_path):
+    _, build = _domain(tmp_path)                       # unpinned nudges only — benign notes
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    assert [i for i in _fresh(issues) if i.severity == "note"]
+    assert ISS.freshness_evaluated(cfg, issues)        # nudges never suppress resolution
+
+
+# ═══ Review round 1 — P2: the remedy targets the INSTALLED layout ═══
+
+def test_body_remedy_renders_the_registered_command_and_installed_path(tmp_path):
+    src, build = _domain(tmp_path)
+    _pin(build)
+    _go_stale(src)
+    fact = _facts(build)[0]
+    body = ISS.render_body(fact, "API")
+    assert "/speckit.arch-governance.repin" in body    # the command consumers actually have
+    assert ("uv run python .specify/extensions/arch-governance/scripts/repin.py . "
+            "'docs:005-fund-model' --apply") in body   # fallback, correct for installed layout
+    # never the repo-root path a consumer does not have
+    assert "python scripts/repin.py" not in body
+    assert ISS.render_body(fact, "API") == body        # determinism preserved (D5)
 
 
 # ═══ Phase 6 — US4: the emitter can fail without touching enforcement (T015/T016) ═══

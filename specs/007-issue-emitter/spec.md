@@ -88,6 +88,7 @@ The tracker is unreachable, the operator's credential is missing, or the API rat
 - Two governed repos in one domain both opt in: each mirrors only its OWN staleness facts to its OWN configured tracker; the emitter never emits for a peer.
 - Config enables the emitter but names no tracker repository: config validation error at load time, before any planning.
 - Rate limiting mid-run: the failed emission is reported, successful ones are recorded, re-run resumes (US4 scenario 3).
+- Freshness was NOT determinately evaluated this run (the `citations_fresh` check is disabled, the pin file is malformed, an evaluation is indeterminate, or a citation fails resolution): the absence of a fact is “not evaluated”, never “confirmed resolved” — no mirror is resolved that run. Each preserved mirror surfaces as an explicit `skip (freshness not evaluated — mirror preserved)` plan row — never a silent omission, never a close: a disabled check must never look identical to a resolved world.
 
 ## Requirements *(mandatory)*
 

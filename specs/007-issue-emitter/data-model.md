@@ -65,13 +65,19 @@ Ordered rows (sorted by pin key), each `(fact-or-record, disposition, detail)`:
 |---|---|---|
 | `create` | fact with no mirror record (or record in `resolved`) | `create` issue → record `open` |
 | `update` | fact + `open` record, content state moved | reality-check → `update_body` (or → dismissed path) |
-| `resolve` | `open` record whose fact is absent from current facts | reality-check → `close` + audit comment (or record-only if human-closed) → `resolved` |
+| `resolve` | `open` record whose fact is absent from current facts **and freshness was determinately evaluated this run (R8)** | reality-check → `close` + audit comment (or record-only if human-closed) → `resolved` |
 | `up-to-date` | fact + `open` record, content state unchanged; or `dismissed` record still stale | none |
-| `skip` | emitter not enabled (dry-run), or row excluded with reason | none |
+| `skip` | emitter not enabled (dry-run); row excluded with reason; or a live mirror whose fact is absent while freshness was NOT evaluated (check disabled / malformed pin file / indeterminate / citation failing resolution — R8: `freshness not evaluated — mirror preserved`, never a resolve) | none |
 
 Apply-time adjustments (R4, surfaced in the report, never errors):
 `update` → **respect-and-note** when reality-check finds human-closed + still stale (one comment,
 record `dismissed`); `resolve` → **record-only** when already human-closed; `get_state` not-found (issue deleted repo-side) → still-stale rows become **create** (new lifecycle), resolved rows become record-only — surfaced in the report, never a crash.
+
+**Evaluation signal** (R8): the plan is built with an `evaluated` flag from
+`freshness_evaluated(cfg, issues)` on the SAME engine run — `checks.citations_fresh`
+enabled AND no structurally-flagged indeterminate `citations_fresh` note AND no
+failure-severity `citations_resolve` finding. Per-run coarse: when False, every would-be
+resolve becomes the explicit preserve-skip above; facts present in the run stay live.
 
 **Sidecar write discipline**: atomic rewrite (tmp + replace) after EACH successful row — a
 failure at row K leaves rows <K recorded exactly (FR-009 partial-success contract).

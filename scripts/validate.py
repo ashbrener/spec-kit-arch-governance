@@ -73,6 +73,13 @@ class Issue:
     # consumer (report, gate, flip guard) byte-identical; only the issues emitter
     # reads it. Typed loosely to avoid a module import cycle (issues imports us).
     fact: object = None
+    # Slice 007 review R8: True on the citations_fresh notes that mean "freshness
+    # could NOT be determinately evaluated" (malformed pin file, indeterminate
+    # skips) — a STRUCTURAL signal, never matched by prose. The emitter uses it to
+    # distinguish confirmed resolution from not-evaluated; unpinned nudges and
+    # orphaned-pin notes stay False (benign — they impair nothing). Additive,
+    # default False: every existing constructor and consumer is byte-identical.
+    indeterminate: bool = False
 
     def render(self) -> str:
         loc = f"  ({self.where})" if self.where else ""
@@ -361,7 +368,7 @@ def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_inde
         out.append(Issue("citations_fresh",
                          f"pin file {P.PIN_FILE} could not be parsed ({exc}) — "
                          f"treating all citations as unpinned for this run",
-                         P.PIN_FILE, severity="note"))
+                         P.PIN_FILE, severity="note", indeterminate=True))
         pins = {}
     keys_seen: set[P.PinKey] = set()
     for c in cits:
@@ -377,7 +384,7 @@ def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_inde
                 out.append(Issue("citations_fresh",
                                  f"{c.relation} {c.raw!r}: freshness indeterminate — the citation does "
                                  f"not resolve (and citations_resolve is disabled)",
-                                 c.source, severity="note"))
+                                 c.source, severity="note", indeterminate=True))
             continue  # FR-009: the citations_resolve failure owns this citation's story
         pin = pins.get(k)
         if pin is None:
@@ -389,7 +396,7 @@ def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_inde
         if t.status != "ok":
             out.append(Issue("citations_fresh",
                              f"{c.relation} {c.raw!r}: freshness indeterminate — {t.reason}",
-                             c.source, severity="note"))
+                             c.source, severity="note", indeterminate=True))
         elif t.digest != pin.digest:
             # Slice 007 (D1/R2): the ONE fact-attachment site. The structured fact rides
             # the same Issue the enforcement path already consumes — one engine, two

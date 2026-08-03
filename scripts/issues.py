@@ -83,6 +83,32 @@ def staleness_facts(issues) -> list[StalenessFact]:
     return sorted(facts, key=lambda f: f.key)
 
 
+def freshness_evaluated(cfg, issues) -> bool:
+    """Whether this engine run DETERMINATELY evaluated freshness (research R8).
+
+    "No facts" has two meanings — CONFIRMED resolution (the check ran determinately
+    and the fact is gone) vs NOT EVALUATED — and only the first may resolve a mirror.
+    Deliberately per-run COARSE: any evaluation-impairing condition suppresses every
+    resolve this run (mirrors preserved with an explicit skip row):
+      - `checks.citations_fresh` disabled — a disabled check must never look
+        identical to a resolved world;
+      - any indeterminate citations_fresh note (malformed pin file, unreadable or
+        unresolvable target) — flagged STRUCTURALLY by the engine, never prose-matched;
+      - any failure-severity citations_resolve finding — freshness deliberately stays
+        silent for a citation whose resolution failed (006 FR-009), so that fact's
+        absence is unowned, not resolved.
+    Benign notes (unpinned nudges, orphaned pins) impair nothing.
+    """
+    if not cfg.checks.citations_fresh:
+        return False
+    for i in issues:
+        if i.check == "citations_fresh" and getattr(i, "indeterminate", False):
+            return False
+        if i.check == "citations_resolve" and i.severity == "fail":
+            return False
+    return True
+
+
 # ──────────────────────────── mirror sidecar (D4/R3) ────────────────────────────
 
 class IssuesFileError(Exception):
@@ -245,9 +271,12 @@ def render_body(fact: StalenessFact, namespace: str) -> str:
         f"| pinned | `{P.abbrev(fact.pinned_digest)}` ({fact.pinned_date}) |\n"
         f"| current | `{P.abbrev(fact.current_digest)}` |\n"
         f"\n"
-        f"**Remedy**: review the upstream change, then reconcile the pin —\n"
+        f"**Remedy**: review the upstream change, then reconcile the pin with the\n"
+        f"`/speckit.arch-governance.repin` command (selector `{fact.value}`), or directly\n"
+        f"from the governed repo's root:\n"
         f"\n"
-        f"    uv run python scripts/repin.py . '{fact.value}' --apply\n"
+        f"    uv run python .specify/extensions/arch-governance/scripts/repin.py . "
+        f"'{fact.value}' --apply\n"
         f"\n"
         f"This body is owned by the issues emitter and is overwritten when the upstream "
         f"state moves again; comments are yours. Closing this issue by hand is respected "
@@ -319,10 +348,17 @@ def _resolution_detail(record: MirrorRecord, pins) -> str:
     return "no longer stale — upstream reverted to the pinned state"
 
 
-def issues_plan(facts, mirrors, pins=None) -> list[PlanRow]:
+def issues_plan(facts, mirrors, pins=None, evaluated=True) -> list[PlanRow]:
     """The deterministic diff of current facts against mirror records — a PURE
     function (offline by construction, D4): every current fact and every recorded
-    mirror gets exactly one disposition (FR-004). Rows sorted by pin key."""
+    mirror gets exactly one disposition (FR-004). Rows sorted by pin key.
+
+    `evaluated` (research R8, from `freshness_evaluated` on the SAME engine run):
+    when False, a live mirror whose fact is absent is NOT resolved — its absence
+    means "not evaluated", not "confirmed resolved" — and it surfaces as an explicit
+    `skip` row (never a silent omission, never a close). Facts that ARE present stay
+    live: a determinate fact is a fact, so create/update/up-to-date are unaffected.
+    """
     rows: list[PlanRow] = []
     facts_by_key: dict[P.PinKey, StalenessFact] = {}
     for f in facts:
@@ -352,6 +388,10 @@ def issues_plan(facts, mirrors, pins=None) -> list[PlanRow]:
         if rec.status == "resolved":
             rows.append(PlanRow("up-to-date", rec.citing, rec.relation, rec.value,
                                 record=rec, detail="resolved — retained for audit"))
+        elif not evaluated:
+            # R8: the fact's absence is NOT a confirmed resolution this run.
+            rows.append(PlanRow("skip", rec.citing, rec.relation, rec.value, record=rec,
+                                detail="freshness not evaluated — mirror preserved"))
         elif rec.status == "dismissed":
             rows.append(PlanRow("resolve", rec.citing, rec.relation, rec.value, record=rec,
                                 detail=_resolution_detail(rec, pins) + "; record-only (dismissed)"))
@@ -629,11 +669,12 @@ def main(argv=None, transport: Optional[IssueTransport] = None) -> int:
 
     issues_found, _stats = V.validate(cfg, repo_root)
     facts = staleness_facts(issues_found)
+    evaluated = freshness_evaluated(cfg, issues_found)   # R8: absent ≠ not-evaluated
     try:
         pins = P.load_pins(repo_root)
     except P.PinLoadError:
         pins = None                              # resolution detail degrades gracefully
-    rows = issues_plan(facts, mirrors, pins)
+    rows = issues_plan(facts, mirrors, pins, evaluated)
     print(render_plan(rows))
 
     if not args.apply:

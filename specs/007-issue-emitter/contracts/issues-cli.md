@@ -37,6 +37,12 @@ RESULT: <create c / update u / resolve r / up-to-date k / skip s>
 Same inputs ⇒ identical bytes (asserted in tests). Digest abbreviations use the existing
 `pins.abbrev` form.
 
+Skip reasons include `freshness not evaluated — mirror preserved` (R8): when freshness was not
+determinately evaluated this run — the `citations_fresh` check disabled, a malformed pin file,
+an indeterminate evaluation, or a citation failing resolution — a live mirror whose fact is
+absent is NEVER resolved; it is preserved and the plan says so explicitly. A disabled check
+must never look identical to a resolved world.
+
 ## Apply report
 
 Plan header, then one line per executed row naming fact, action taken, and issue reference

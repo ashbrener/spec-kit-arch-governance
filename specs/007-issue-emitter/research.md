@@ -107,3 +107,31 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   is an honest no-op answer (0) so CI can run the verb unconditionally.
 - **Alternatives considered**: exit 1 for not-enabled (rejected: punishes the documented
   CI-unconditional pattern); silent no-op (rejected: the repo's never-silent doctrine).
+
+## R8 — Evaluation-status signal: absent vs NOT EVALUATED (review round 1, P1)
+
+- **Decision**: `issues_plan` receives an `evaluated` flag beside the facts, derived from the
+  SAME engine run (`freshness_evaluated`): freshness counts as evaluated ⟺
+  `checks.citations_fresh` is enabled AND the run produced no evaluation-impairing condition —
+  no malformed-pin-file note, no indeterminate skip (both carried as a STRUCTURAL
+  `indeterminate` flag on the engine's `Issue`, never prose-matched), and no failure-severity
+  `citations_resolve` finding (freshness deliberately stays silent for a citation whose
+  resolution failed — 006 FR-009 — so that fact's absence is unowned, not resolved).
+  Granularity is deliberately **per-run coarse**: any impairing condition suppresses every
+  `resolve` row that run; each preserved mirror surfaces as an explicit
+  `skip … (freshness not evaluated — mirror preserved)` row. Facts that ARE present stay
+  live — create/update/up-to-date are unaffected (a determinate fact is a fact). Benign notes
+  (unpinned nudges, orphaned pins) impair nothing.
+- **Rationale**: "no facts" has two meanings — CONFIRMED resolution vs NOT EVALUATED — and only
+  the first may close a live issue. Without the signal, disabling the check (or a malformed pin
+  file collapsing every pin to unpinned) made the planner resolve every open mirror — often
+  closing with a fabricated "upstream reverted" audit comment — and restoring the check later
+  spawned a second lifecycle for staleness that never resolved. A disabled check must never
+  look identical to a resolved world, and the plan must SAY why nothing happens (never-silent
+  doctrine). Preservation is the safe direction: the next clean determinate run resolves.
+- **Alternatives considered**: per-fact indeterminacy attribution (rejected: the engine's notes
+  are not reliably keyable to individual pin keys, and a wrong attribution silently closes a
+  live mirror — coarse is the honest, simple form); treating disabled-check runs as empty-fact
+  resolutions (rejected: the exact bug); silently omitting preserved mirrors from the plan
+  (rejected: FR-004 assigns every recorded mirror a disposition — an explicit `skip` with the
+  reason is the honest row).
