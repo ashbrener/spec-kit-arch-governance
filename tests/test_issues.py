@@ -99,6 +99,9 @@ class FakeTransport:
         # round 6 P1-1: when False, reads raise plain EmissionError — an access
         # problem is a FAILURE, never a deletion verdict
         self.repo_accessible = True
+        # round 7 P2-1: when True, the SEARCH index has not yet caught up — the
+        # search read misses while the real-time list read still sees the issue
+        self.search_lag = False
 
     def _record(self, method, *args):
         self._counts[method] = self._counts.get(method, 0) + 1
@@ -141,12 +144,21 @@ class FakeTransport:
         self._record("close", repo, number)
         self.states[number] = "closed"
 
-    def find_by_marker(self, repo, marker):
-        self._record("find_by_marker", repo, marker)
+    def _scan_bodies(self, marker):
         for n, body in {**self.seeded_issue_bodies, **self.created}.items():
             if marker in body:
                 return n
         return None
+
+    def find_by_marker(self, repo, marker):
+        self._record("find_by_marker", repo, marker)
+        if self.search_lag:
+            return None                    # the search index has not caught up yet
+        return self._scan_bodies(marker)
+
+    def find_by_marker_in_recent(self, repo, marker):
+        self._record("find_by_marker_in_recent", repo, marker)
+        return self._scan_bodies(marker)   # the list endpoint is real-time
 
     def has_comment_marker(self, repo, number, marker):
         self._record("has_comment_marker", repo, number, marker)
@@ -214,7 +226,7 @@ def _rec(**kw):
     base = dict(citing="specs/001-derived/spec.md", relation="derived_from",
                 value="docs:005-fund-model", repo="acme/widgets", issue=42,
                 pinned_digest="sha256:" + "a" * 64, current_digest="sha256:" + "b" * 64,
-                status="open", lifecycle=1)
+                status="open", lifecycle=1, token=None)
     base.update(kw)
     return ISS.MirrorRecord(**base)
 
@@ -412,14 +424,22 @@ def _stale_pair(tmp):
 
 def _apply(build, cfg, root, facts, transport, mirrors=None):
     mirrors = dict(ISS.load_mirrors(root) if mirrors is None else mirrors)
-    issues, _ = V.validate(cfg, root)                      # same-run evaluation signal (R8)
-    evaluated = ISS.freshness_evaluated(cfg, issues)
+    extras = V.ValidationExtras()                          # round 7 P2-3 side-channel
+    issues, _ = V.validate(cfg, root, extras)              # same-run evaluation signal (R8)
+    evaluated = ISS.freshness_evaluated(cfg, issues, extras)
     cited = {P.pin_key(c.source, c.relation, c.raw)        # same-run citation set (R11)
              for c in V.scan_citations(root, cfg.specs_dir, cfg.citation_keys, cfg.namespace)}
     rows = ISS.issues_plan(facts, mirrors, P.load_pins(root), evaluated, cited)
     report: list[str] = []
     mutated = ISS.apply_plan(rows, mirrors, cfg, root, transport, report)
     return rows, report, mutated
+
+
+def _validated_with_extras(build):
+    cfg, root = V.load_config(build)
+    extras = V.ValidationExtras()
+    issues, _ = V.validate(cfg, root, extras)
+    return cfg, root, issues, extras
 
 
 def test_apply_creates_one_issue_per_fact_and_records_open_mirrors(tmp_path):
@@ -883,7 +903,8 @@ def test_intent_with_no_remote_effect_creates_exactly_once(tmp_path):
     t2 = FakeTransport()                                   # marker probe finds nothing
     rows, report, _ = _apply(build, cfg, root, facts, t2)
     assert len(t2.of("find_by_marker")) == 1
-    assert len(t2.of("create")) == 1                       # exactly one create
+    assert len(t2.of("find_by_marker_in_recent")) == 1     # round 7 P2-1: list fallback ran
+    assert len(t2.of("create")) == 1                       # exactly one create — both missed
     assert _mirrors(build)[k].status == "open" and _mirrors(build)[k].issue == 101
 
 
@@ -968,12 +989,13 @@ def test_dismissal_note_retry_never_double_posts(tmp_path, monkeypatch):
 
 
 def test_mirror_file_roundtrips_intent_statuses(tmp_path):
-    creating = _rec(status="creating", issue=None)
+    creating = _rec(status="creating", issue=None, token="c" * 32)
     dismissing = _rec(citing="specs/001-derived/plan.md", relation="cites",
-                      value="CORE-ADR-001", status="dismissing")
+                      value="CORE-ADR-001", status="dismissing", token="d" * 32)
     ISS.write_mirrors(tmp_path, [creating, dismissing])
     loaded = ISS.load_mirrors(tmp_path)
     assert loaded[creating.key].status == "creating" and loaded[creating.key].issue is None
+    assert loaded[creating.key].token == "c" * 32          # stored token round-trips (P2-2)
     assert loaded[dismissing.key].status == "dismissing" and loaded[dismissing.key].issue == 42
     # a missing issue number is ONLY legal for a creating intent
     bad = yaml.safe_load((tmp_path / ISS.MIRROR_FILE).read_text())
@@ -1006,7 +1028,8 @@ def test_gh_transport_satisfies_the_full_transport_protocol():
     members = [n for n in dir(ISS.IssueTransport)
                if not n.startswith("_") and callable(getattr(ISS.IssueTransport, n))]
     assert set(members) >= {"get_state", "create", "update_body", "comment", "close",
-                            "find_by_marker", "has_comment_marker"}
+                            "find_by_marker", "find_by_marker_in_recent",
+                            "has_comment_marker"}
     for cls in (ISS.GhTransport, FakeTransport):
         for name in members:
             impl = getattr(cls, name, None)
@@ -1098,6 +1121,209 @@ def test_gh_transport_recovery_reads_map_failures_to_emission_error(monkeypatch)
     with pytest.raises(ISS.EmissionError) as e2:
         g.has_comment_marker("o/r", 7, "<!-- m -->")
     assert "rate limit" in str(e2.value)
+
+
+# ═══ Review round 7 — P2-1: search miss falls back to the real-time recent list ═══
+
+def test_search_lag_recovery_falls_back_to_recent_list(tmp_path, monkeypatch):
+    src, build, cfg, root, facts, k = _one_stale_enabled(tmp_path)
+    real = ISS.write_mirrors
+    n = {"count": 0}
+
+    def flaky(root_, records):                         # fail ONLY the post-create write
+        n["count"] += 1
+        if n["count"] == 2:
+            raise OSError("disk full")
+        return real(root_, records)
+
+    monkeypatch.setattr(ISS, "write_mirrors", flaky)
+    t = FakeTransport()
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)             # created remotely, unrecorded
+    # retry seconds later: the SEARCH index has not caught up — the list read has
+    t2 = FakeTransport()
+    t2.seeded_issue_bodies[101] = t.created[101]
+    t2.search_lag = True
+    rows, report, _ = _apply(build, cfg, root, facts, t2)
+    assert len(t2.of("find_by_marker")) == 1           # search tried first…
+    assert len(t2.of("find_by_marker_in_recent")) == 1  # …then the authoritative list
+    assert t2.of("create") == []                       # ZERO duplicates
+    rec = _mirrors(build)[k]
+    assert rec.status == "open" and rec.issue == 101
+    assert any("adopted" in ln for ln in report)
+
+
+def test_gh_transport_recent_list_fallback(monkeypatch):
+    g = ISS.GhTransport()
+    assert g._argv_list_recent_issues("o/r", 1) == [
+        "gh", "api",
+        "repos/o/r/issues?state=all&sort=created&direction=desc&per_page=100&page=1"]
+    marker = "f" * 32
+    pages = {}
+
+    def fake_run(argv):
+        pages.setdefault("calls", []).append(argv)
+        page = int(argv[-1].rsplit("page=", 1)[1])
+        if page == 1:
+            items = ", ".join(f'{{"number": {i}, "body": "issue {i}"}}'
+                              for i in range(1, 101))
+            return f"[{items}]"
+        return f'[{{"number": 442, "body": "carries {marker} here"}}]'
+
+    monkeypatch.setattr(g, "_run", fake_run)
+    assert g.find_by_marker_in_recent("o/r", marker) == 442   # found on page 2
+    assert pages["calls"] == [g._argv_list_recent_issues("o/r", 1),
+                              g._argv_list_recent_issues("o/r", 2)]
+    # the cap is respected: full pages with no match stop at the documented bound
+    calls2 = []
+
+    def full_pages_no_match(argv):
+        calls2.append(argv)
+        items = ", ".join(f'{{"number": {i}, "body": "x"}}' for i in range(1, 101))
+        return f"[{items}]"
+
+    monkeypatch.setattr(g, "_run", full_pages_no_match)
+    assert g.find_by_marker_in_recent("o/r", marker) is None
+    assert len(calls2) == ISS._LIST_RECOVERY_PAGES     # bounded, documented cap
+    # a short page ends the scan early — one call only
+    calls3 = []
+
+    def short_page(argv):
+        calls3.append(argv)
+        return '[{"number": 1, "body": "x"}]'
+
+    monkeypatch.setattr(g, "_run", short_page)
+    assert g.find_by_marker_in_recent("o/r", marker) is None
+    assert len(calls3) == 1
+    monkeypatch.setattr(g, "_run", lambda argv: '{"not": "a list"}')
+    with pytest.raises(ISS.EmissionError):
+        g.find_by_marker_in_recent("o/r", marker)      # shape violation is typed
+
+
+# ═══ Review round 7 — P2-2: recovery uses the STORED token, never live config ═══
+
+def _flip_namespace(build, new_ns="XYZ"):
+    f = build / ".spec-arch-governance.yml"
+    f.write_text(f.read_text().replace("namespace: API", f"namespace: {new_ns}"))
+
+
+def test_namespace_change_mid_creating_still_adopts_via_stored_token(tmp_path, monkeypatch):
+    src, build, cfg, root, facts, k = _one_stale_enabled(tmp_path)
+    real = ISS.write_mirrors
+    n = {"count": 0}
+
+    def flaky(root_, records):
+        n["count"] += 1
+        if n["count"] == 2:
+            raise OSError("disk full")
+        return real(root_, records)
+
+    monkeypatch.setattr(ISS, "write_mirrors", flaky)
+    t = FakeTransport()
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)             # created remotely, unrecorded
+    stored = ISS.load_mirrors(build)[k].token
+    assert stored == ISS._search_token("API", k, 1)    # intent persisted the token
+    _flip_namespace(build)                             # config mutates mid-intent
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts2 = ISS.staleness_facts(issues)
+    t2 = FakeTransport()
+    t2.seeded_issue_bodies[101] = t.created[101]       # body carries the OLD-ns token
+    rows, report, _ = _apply(build, cfg, root, facts2, t2)
+    assert t2.of("create") == []                       # adopted — zero duplicates
+    probe = t2.of("find_by_marker")[0]
+    assert probe[2] == stored                          # STORED token, never recomputed
+    rec = _mirrors(build)[k]
+    assert rec.status == "open" and rec.issue == 101
+
+
+def test_namespace_change_mid_dismissing_never_double_posts(tmp_path, monkeypatch):
+    src, build, k = _mirrored_stale(tmp_path)          # open mirror #101, still stale
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    real = ISS.write_mirrors
+    n = {"count": 0}
+
+    def flaky(root_, records):                         # fail the dismissed-CONFIRM write
+        n["count"] += 1
+        if n["count"] == 2:
+            raise OSError("disk full")
+        return real(root_, records)
+
+    monkeypatch.setattr(ISS, "write_mirrors", flaky)
+    t = FakeTransport()
+    t.states[101] = "closed"
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)
+    stored = ISS.load_mirrors(build)[k].token
+    assert stored == ISS._search_token("API", k, 1)
+    _flip_namespace(build)                             # config mutates mid-intent
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t2 = FakeTransport()
+    t2.states[101] = "closed"
+    t2.seeded_comments[101] = list(t.posted.get(101, []))   # OLD-ns note on the tracker
+    rows, report, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t2)
+    assert t2.of("comment") == []                      # ZERO re-posts
+    check = t2.of("has_comment_marker")[0]
+    assert check[3] == stored                          # STORED token, never recomputed
+    assert _mirrors(build)[k].status == "dismissed"
+
+
+def test_mirror_file_requires_token_on_intent_records(tmp_path):
+    for status, issue in (("creating", None), ("resolving", 42), ("dismissing", 42)):
+        ISS.write_mirrors(tmp_path, [_rec(status=status, issue=issue, token="a" * 32)])
+        doc = yaml.safe_load((tmp_path / ISS.MIRROR_FILE).read_text())
+        doc["mirrors"][0].pop("token")
+        (tmp_path / ISS.MIRROR_FILE).write_text(yaml.safe_dump(doc))
+        with pytest.raises(ISS.IssuesFileError):       # no lenient default (P2-2)
+            ISS.load_mirrors(tmp_path)
+    # settled records need no token (retained for forensics when present)
+    ISS.write_mirrors(tmp_path, [_rec(status="resolved")])
+    assert ISS.load_mirrors(tmp_path)[_rec().key].token is None
+
+
+# ═══ Review round 7 — P2-3: the malformed-FM signal never touches validate output ═══
+
+def test_malformed_fm_never_changes_validate_output_when_emitter_absent(tmp_path, capsys):
+    """FR-001/SC-001 guard: a repo that never opted in must see BYTE-IDENTICAL
+    validate/gate output whatever the emitter needs to know. The malformed-FM twin
+    harvests the same (empty) citation set as a valid-empty twin, so their pre-007
+    reports are the same bytes — and the explicit expected report is asserted too.
+    (Gap noted: no pre-007 fixture had malformed FM, which is why rounds 5/6
+    missed this leak.)"""
+    import gate as G
+    outs = []
+    for name, fm in (("a", "---\nderived_from: [unclosed\n---\n# Derived spec\n"),
+                     ("b", "---\nderived_from: []\n---\n# Derived spec\n")):
+        src, build = _domain(tmp_path / name)
+        (build / "specs" / "001-derived" / "spec.md").write_text(fm)
+        capsys.readouterr()
+        code_v = V.main([str(build)])
+        out_v = capsys.readouterr().out
+        code_g = G.main([str(build)])
+        out_g = capsys.readouterr().out
+        outs.append((code_v, out_v, code_g, out_g))
+    assert outs[0] == outs[1]                          # byte-identical, exit codes too
+    assert "front matter" not in outs[0][1] and "front matter" not in outs[0][3]
+    assert outs[0][1] == (
+        "arch-governance · role=build ns=API mode=advisory · 0 ADR(s), 1 citation(s)\n"
+        "  [citations_fresh] cites 'CORE-ADR-001' is unpinned — run `repin --apply` "
+        "to start freshness tracking  (specs/001-derived/plan.md)\n"
+        "RESULT: PASS — 0 issues. Citations resolve, namespaces valid, accepted ADRs "
+        "immutable.\n")
+
+
+def test_emitter_still_sees_malformed_fm_through_extras(tmp_path, capsys):
+    src, build, k = _mirrored_stale(tmp_path)
+    (build / "specs" / "001-derived" / "spec.md").write_text(
+        "---\nderived_from: [unclosed\n---\n# Derived spec\n")
+    capsys.readouterr()
+    assert ISS.main([str(build)]) == 0                 # dry-run still says why
+    out = capsys.readouterr().out
+    assert "skip" in out and "freshness not evaluated" in out
 
 
 # ═══ Review round 6 — P1-1: a 404 is a verdict only when the repo is reachable ═══
@@ -1226,12 +1452,10 @@ def test_unterminated_front_matter_preserves_open_mirrors(tmp_path):
     spec = build / "specs" / "001-derived" / "spec.md"
     spec.write_text("---\nderived_from:\n  - docs:005-fund-model\n# closing delimiter lost\n")
     assert V.front_matter_malformed(spec.read_text()) is True
-    cfg, root = V.load_config(build)
-    issues, _ = V.validate(cfg, root)
+    cfg, root, issues, extras = _validated_with_extras(build)
     assert ISS.staleness_facts(issues) == []
-    assert not ISS.freshness_evaluated(cfg, issues)    # opened-but-unterminated = malformed
-    flagged = [i for i in issues if i.check == "citations_fresh" and i.indeterminate]
-    assert any("front matter" in i.detail for i in flagged)
+    assert not ISS.freshness_evaluated(cfg, issues, extras)  # opened-but-unterminated
+    assert extras.malformed_sources == ["specs/001-derived/spec.md"]   # extras channel (P2-3)
     before = (build / ISS.MIRROR_FILE).read_bytes()
     t = FakeTransport()
     rows, report, mutated = _apply(build, cfg, root, [], t)
@@ -1253,9 +1477,9 @@ def test_horizontal_rule_without_front_matter_stays_absent(tmp_path):
     _pin(build)
     (build / "specs" / "002-plainrule").mkdir(parents=True)
     (build / "specs" / "002-plainrule" / "spec.md").write_text(text)
-    cfg, root = V.load_config(build)
-    issues, _ = V.validate(cfg, root)
-    assert ISS.freshness_evaluated(cfg, issues)        # never over-triggers
+    cfg, root, issues, extras = _validated_with_extras(build)
+    assert extras.malformed_sources == []
+    assert ISS.freshness_evaluated(cfg, issues, extras)   # never over-triggers
 
 
 # ═══ Review round 6 — P2: the SEARCH token is fixed-length, identity-independent ═══
@@ -1447,12 +1671,10 @@ def test_malformed_front_matter_preserves_open_mirrors(tmp_path, capsys):
     spec = build / "specs" / "001-derived" / "spec.md"
     good = spec.read_text()
     spec.write_text("---\nderived_from: [unclosed\n---\n# Derived spec\n")
-    cfg, root = V.load_config(build)
-    issues, _ = V.validate(cfg, root)
+    cfg, root, issues, extras = _validated_with_extras(build)
     assert ISS.staleness_facts(issues) == []           # no fact harvested…
-    assert not ISS.freshness_evaluated(cfg, issues)    # …but NOT "citations absent"
-    flagged = [i for i in issues if i.check == "citations_fresh" and i.indeterminate]
-    assert any("front matter" in i.detail for i in flagged)
+    assert not ISS.freshness_evaluated(cfg, issues, extras)   # …but NOT "citations absent"
+    assert extras.malformed_sources == ["specs/001-derived/spec.md"]   # extras (P2-3)
     before = (build / ISS.MIRROR_FILE).read_bytes()
     t = FakeTransport()
     rows, report, mutated = _apply(build, cfg, root, [], t)
@@ -1463,9 +1685,8 @@ def test_malformed_front_matter_preserves_open_mirrors(tmp_path, capsys):
     assert (build / ISS.MIRROR_FILE).read_bytes() == before
     # restoring the front matter resumes normal evaluation
     spec.write_text(good)
-    cfg, root = V.load_config(build)
-    issues, _ = V.validate(cfg, root)
-    assert ISS.freshness_evaluated(cfg, issues)
+    cfg, root, issues, extras = _validated_with_extras(build)
+    assert ISS.freshness_evaluated(cfg, issues, extras)
     assert len(ISS.staleness_facts(issues)) == 1       # the fact is back
 
 
@@ -1474,11 +1695,9 @@ def test_malformed_plan_front_matter_also_flags_not_evaluated(tmp_path):
     _pin(build)
     (build / "specs" / "001-derived" / "plan.md").write_text(
         "---\ncites: {broken\n---\n# Plan\n")
-    cfg, root = V.load_config(build)
-    issues, _ = V.validate(cfg, root)
-    assert not ISS.freshness_evaluated(cfg, issues)
-    flagged = [i for i in issues if i.check == "citations_fresh" and i.indeterminate]
-    assert any("plan.md" in i.where for i in flagged)
+    cfg, root, issues, extras = _validated_with_extras(build)
+    assert not ISS.freshness_evaluated(cfg, issues, extras)
+    assert extras.malformed_sources == ["specs/001-derived/plan.md"]
 
 
 def test_files_without_front_matter_are_not_flagged(tmp_path):
@@ -1486,9 +1705,9 @@ def test_files_without_front_matter_are_not_flagged(tmp_path):
     _pin(build)
     (build / "specs" / "002-plain").mkdir(parents=True)
     (build / "specs" / "002-plain" / "spec.md").write_text("# No front matter at all\n")
-    cfg, root = V.load_config(build)
-    issues, _ = V.validate(cfg, root)
-    assert ISS.freshness_evaluated(cfg, issues)        # absence is honest, not malformed
+    cfg, root, issues, extras = _validated_with_extras(build)
+    assert extras.malformed_sources == []
+    assert ISS.freshness_evaluated(cfg, issues, extras)   # absence is honest, not malformed
 
 
 # ═══ Review round 3 — P2-3: resolution detail via the current citation set ═══
@@ -1688,9 +1907,10 @@ def test_restale_fact_with_pending_close_completes_the_old_lifecycle_first(tmp_p
 
 
 def test_mirror_file_roundtrips_resolving_status(tmp_path):
-    r = _rec(status="resolving")
+    r = _rec(status="resolving", token="e" * 32)       # intents carry their token (P2-2)
     ISS.write_mirrors(tmp_path, [r])
-    assert ISS.load_mirrors(tmp_path)[r.key].status == "resolving"
+    loaded = ISS.load_mirrors(tmp_path)[r.key]
+    assert loaded.status == "resolving" and loaded.token == "e" * 32
 
 
 def test_sidecar_write_failure_is_a_typed_emission_error(tmp_path, capsys, monkeypatch):

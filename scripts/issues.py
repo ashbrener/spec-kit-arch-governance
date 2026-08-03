@@ -92,7 +92,7 @@ def staleness_facts(issues) -> list[StalenessFact]:
     return sorted(facts, key=lambda f: f.key)
 
 
-def freshness_evaluated(cfg, issues) -> bool:
+def freshness_evaluated(cfg, issues, extras=None) -> bool:
     """Whether this engine run DETERMINATELY evaluated freshness (research R8).
 
     "No facts" has two meanings — CONFIRMED resolution (the check ran determinately
@@ -109,6 +109,10 @@ def freshness_evaluated(cfg, issues) -> bool:
     Benign notes (unpinned nudges, orphaned pins) impair nothing.
     """
     if not cfg.checks.citations_fresh:
+        return False
+    if extras is not None and getattr(extras, "malformed_sources", None):
+        # round 7 P2-3: the malformed-front-matter harvest failure travels through
+        # validate's extras side-channel (never a finding — FR-001/SC-001)
         return False
     for i in issues:
         if i.check == "citations_fresh" and getattr(i, "indeterminate", False):
@@ -146,6 +150,13 @@ class MirrorRecord:
     # retained predecessor record), never from tracker state. Required — no
     # default: every writer states the lifecycle it means.
     lifecycle: int
+    # The recovery token AS POSTED (round 7 P2-2): persisted on every intent write
+    # (`creating`/`resolving`/`dismissing`) so recovery matches the token that is
+    # actually on the tracker — never one recomputed from live config, which can
+    # drift (a namespace change mid-intent would miss and duplicate). REQUIRED on
+    # intent statuses (no lenient default); retained on settled records for
+    # forensics when present, but nothing reads it there.
+    token: Optional[str] = None
 
     @property
     def key(self) -> P.PinKey:
@@ -180,6 +191,15 @@ def _validate_record(r: MirrorRecord) -> None:
     elif not isinstance(r.issue, int) or isinstance(r.issue, bool):
         raise IssuesFileError(f"mirror for {r.value!r} ({r.status}) must carry an integer "
                               f"issue number, got {type(r.issue).__name__}")
+    if r.status in ("creating", "resolving", "dismissing"):
+        # round 7 P2-2: an intent's recovery must use the token AS POSTED — a
+        # missing token would force a recompute from live config, which can drift.
+        if not isinstance(r.token, str) or not r.token:
+            raise IssuesFileError(f"mirror for {r.value!r} is an intent ({r.status}) "
+                                  f"but has no stored 'token' — recovery cannot match "
+                                  f"the posted marker")
+    elif r.token is not None and not isinstance(r.token, str):
+        raise IssuesFileError(f"mirror for {r.value!r} has a non-string 'token'")
     if not isinstance(r.lifecycle, int) or isinstance(r.lifecycle, bool) or r.lifecycle < 1:
         # REQUIRED (round 5 P1): the branch is unreleased, so no lenient default —
         # a missing/invalid lifecycle is corruption, and defaulting it could scope a
@@ -227,7 +247,8 @@ def load_mirrors(repo_root) -> dict[P.PinKey, MirrorRecord]:
                              value=_scalar(e, "value"), repo=_scalar(e, "repo"),
                              issue=number, pinned_digest=_scalar(e, "pinned_digest"),
                              current_digest=_scalar(e, "current_digest"),
-                             status=_scalar(e, "status"), lifecycle=e.get("lifecycle"))
+                             status=_scalar(e, "status"), lifecycle=e.get("lifecycle"),
+                             token=e.get("token"))
             _validate_record(r)
             if r.key in out:
                 raise IssuesFileError(f"duplicate mirror identity {r.key} — the file is "
@@ -249,7 +270,8 @@ def mirrors_to_yaml(records) -> str:
             {"citing": r.citing, "relation": r.relation, "value": r.value,
              "repo": r.repo, "issue": r.issue, "lifecycle": r.lifecycle,
              "pinned_digest": r.pinned_digest,
-             "current_digest": r.current_digest, "status": r.status}
+             "current_digest": r.current_digest, "status": r.status,
+             **({"token": r.token} if r.token is not None else {})}
             for r in sorted(records, key=lambda r: r.key)
         ],
     }
@@ -303,6 +325,12 @@ def _marker(namespace: str, key: P.PinKey, lifecycle: int) -> str:
 # GitHub caps issue titles at 256 characters (bodies at 65536 — our bodies are a few
 # hundred bytes, ample headroom, and they carry the FULL identity + marker).
 _TITLE_MAX = 256
+
+# The search-lag fallback's bounded cap (round 7 P2-1): 2 pages × 100 = the 200
+# most-recent issues. An interrupted create is recent by construction — it happened
+# on the PREVIOUS apply run — so this bound is generous while keeping the recovery
+# read strictly bounded (no full listing).
+_LIST_RECOVERY_PAGES = 2
 
 
 def render_title(fact: StalenessFact, namespace: str) -> str:
@@ -567,6 +595,7 @@ class IssueTransport(Protocol):
     def close(self, repo: str, number: int) -> None: ...
     # Bounded recovery reads (R10) — apply-time only, one call per interrupted row:
     def find_by_marker(self, repo: str, marker: str) -> Optional[int]: ...
+    def find_by_marker_in_recent(self, repo: str, marker: str) -> Optional[int]: ...
     def has_comment_marker(self, repo: str, number: int, marker: str) -> bool: ...
 
 
@@ -613,6 +642,13 @@ class GhTransport:
     def _argv_repo(self, repo: str) -> list[str]:
         # the 404-disambiguation probe (round 6 P1-1) — issue-404 path only
         return [self.gh, "api", f"repos/{repo}"]
+
+    def _argv_list_recent_issues(self, repo: str, page: int) -> list[str]:
+        # the search-lag fallback (round 7 P2-1): the issues LIST endpoint is
+        # real-time (no search-index delay); recent-first, bounded pages
+        return [self.gh, "api",
+                f"repos/{repo}/issues?state=all&sort=created&direction=desc"
+                f"&per_page=100&page={page}"]
 
     def _argv_list_comments(self, repo: str, number: int) -> list[str]:
         # FULLY paginated (round 5 P2-1): the default page size (30) would hide a
@@ -703,6 +739,32 @@ class GhTransport:
                 return number
         return None
 
+    def find_by_marker_in_recent(self, repo: str, marker: str) -> Optional[int]:
+        """The search-miss fallback (round 7 P2-1): GitHub's issue-search index is
+        asynchronously populated, so a create interrupted moments ago can be
+        invisible to search while very much existing. An interrupted create is
+        RECENT by construction, so a bounded recent-first scan of the real-time
+        issues LIST endpoint is authoritative for exactly this case — capped at
+        _LIST_RECOVERY_PAGES pages (the list includes PRs, which simply never
+        match the token)."""
+        for page in range(1, _LIST_RECOVERY_PAGES + 1):
+            out = self._run(self._argv_list_recent_issues(repo, page))
+            try:
+                data = json.loads(out)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise EmissionError(f"`gh api` returned unparseable JSON: {exc}") from exc
+            if not isinstance(data, list):
+                raise EmissionError(f"`gh api` issues list returned "
+                                    f"{type(data).__name__}, expected a list")
+            for item in data:
+                if isinstance(item, dict) and marker in str(item.get("body") or ""):
+                    number = item.get("number")
+                    if isinstance(number, int) and not isinstance(number, bool):
+                        return number
+            if len(data) < 100:
+                break                       # a short page ends the listing
+        return None
+
     def has_comment_marker(self, repo: str, number: int, marker: str) -> bool:
         out = self._run(self._argv_list_comments(repo, number))
         try:
@@ -767,18 +829,21 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
         # intent-write failure is a clean abort (nothing remote has happened), and
         # an intent without a number tells the NEXT run "a create may exist; probe
         # by marker before creating again". The lifecycle ordinal (round 5 P1)
-        # scopes that probe to THIS issue, never a predecessor's.
+        # scopes that probe to THIS issue, never a predecessor's; the computed
+        # TOKEN is persisted on the intent (round 7 P2-2) so recovery matches the
+        # token AS POSTED, never one recomputed from live (mutable) config.
+        tok = _search_token(ns, f.key, lifecycle)
         record(MirrorRecord(citing=f.citing, relation=f.relation, value=f.value,
                             repo=target, issue=None, pinned_digest=f.pinned_digest,
                             current_digest=f.current_digest, status="creating",
-                            lifecycle=lifecycle))
+                            lifecycle=lifecycle, token=tok))
         number = transport.create(target, render_title(f, ns),
                                   render_body(f, ns, lifecycle),
                                   list(cfg.issues.labels))
         record(MirrorRecord(citing=f.citing, relation=f.relation, value=f.value,
                             repo=target, issue=number, pinned_digest=f.pinned_digest,
                             current_digest=f.current_digest, status="open",
-                            lifecycle=lifecycle))
+                            lifecycle=lifecycle, token=tok))
         report.append(_audit("created", row, number, note))
 
     def dismiss(row: PlanRow, rec: MirrorRecord, f: StalenessFact) -> None:
@@ -786,10 +851,11 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
         # last-emitted (R5): the body was not updated. R10 intent discipline: the
         # `dismissing` intent is persisted BEFORE the note, so an interrupted
         # confirm write can never cause a double post (retry marker-checks).
-        record(replace(rec, status="dismissing"))
+        tok = _search_token(ns, row.key, rec.lifecycle)
+        record(replace(rec, status="dismissing", token=tok))
         transport.comment(rec.repo, rec.issue,
                           render_dismissal_comment(f, ns, rec.lifecycle))
-        record(replace(rec, status="dismissed"))
+        record(replace(rec, status="dismissed", token=tok))
         report.append(_audit("dismissed", row, rec.issue,
                              "closed by operator while still stale — noted, "
                              "will not re-open"))
@@ -799,8 +865,7 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                                      "will not re-open") -> None:
         # R10 recovery: the note may or may not have posted — ONE bounded,
         # issue-scoped marker check decides; never a second note.
-        if not transport.has_comment_marker(rec.repo, rec.issue,
-                                            _search_token(ns, row.key, rec.lifecycle)):
+        if not transport.has_comment_marker(rec.repo, rec.issue, rec.token):
             transport.comment(rec.repo, rec.issue,
                               render_dismissal_comment(f, ns, rec.lifecycle))
         record(replace(rec, status="dismissed"))
@@ -842,8 +907,11 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                 # closed issue can never match). Adoption VERIFIES the found
                 # issue's state against the intent being recovered — never a
                 # silent adopt into `open`.
-                found = transport.find_by_marker(rec.repo,
-                                                 _search_token(ns, row.key, rec.lifecycle))
+                found = transport.find_by_marker(rec.repo, rec.token)
+                if found is None:
+                    # round 7 P2-1: search is index-lagged; the recent LIST is
+                    # real-time — one bounded fallback before trusting the miss
+                    found = transport.find_by_marker_in_recent(rec.repo, rec.token)
                 if found is not None:
                     try:
                         state = transport.get_state(rec.repo, found)
@@ -904,8 +972,9 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                 # open → adopt (a normal lifecycle resolves it next run); found
                 # closed → the resolution is already complete: record-only; not
                 # found / deleted → the create never happened, clear the intent.
-                found = transport.find_by_marker(rec.repo,
-                                                 _search_token(ns, row.key, rec.lifecycle))
+                found = transport.find_by_marker(rec.repo, rec.token)
+                if found is None:
+                    found = transport.find_by_marker_in_recent(rec.repo, rec.token)
                 if found is None:
                     erase(row.key)
                     report.append(_audit("recorded", row, None,
@@ -969,15 +1038,15 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                 # read) before re-posting, then completes the close — no duplicate
                 # audit comments, no close without its audit trail.
                 if rec.status != "resolving":
-                    record(replace(rec, status="resolving"))
+                    record(replace(rec, status="resolving",
+                                   token=_search_token(ns, row.key, rec.lifecycle)))
                     transport.comment(rec.repo, rec.issue,
                                       render_resolution_comment(rec, row.detail, ns))
-                elif not transport.has_comment_marker(rec.repo, rec.issue,
-                                                      _search_token(ns, row.key, rec.lifecycle)):
+                elif not transport.has_comment_marker(rec.repo, rec.issue, rec.token):
                     transport.comment(rec.repo, rec.issue,
                                       render_resolution_comment(rec, row.detail, ns))
                 transport.close(rec.repo, rec.issue)
-                record(replace(rec, status="resolved"))
+                record(replace(mirrors[row.key], status="resolved"))
                 report.append(_audit("resolved", row, rec.issue,
                                      row.detail or "closed with audit comment"))
             mutated = True
@@ -1027,9 +1096,10 @@ def main(argv=None, transport: Optional[IssueTransport] = None) -> int:
         print(f"issues: mirror file {MIRROR_FILE} is broken — {exc}", file=sys.stderr)
         return 2
 
-    issues_found, _stats = V.validate(cfg, repo_root)
+    extras = V.ValidationExtras()                # round 7 P2-3: the non-finding channel
+    issues_found, _stats = V.validate(cfg, repo_root, extras)
     facts = staleness_facts(issues_found)
-    evaluated = freshness_evaluated(cfg, issues_found)   # R8: absent ≠ not-evaluated
+    evaluated = freshness_evaluated(cfg, issues_found, extras)   # R8: absent ≠ not-evaluated
     try:
         pins = P.load_pins(repo_root)
     except P.PinLoadError:

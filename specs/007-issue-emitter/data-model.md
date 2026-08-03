@@ -42,6 +42,7 @@ One entry per mirrored fact. File: `version: v1`, records sorted by pin key (det
 | `current_digest` | `str` | last-emitted current digest |
 | `status` | `str` | `open` \| `creating` \| `resolving` \| `dismissing` \| `resolved` \| `dismissed` |
 | `lifecycle` | `int` (>= 1, REQUIRED) | the key's issue-lifecycle ordinal (round 5 P1): 1 for the first issue, +1 per NEW issue (restale-after-resolved; deleted-and-recreated). Scopes the recovery marker; sourced from the sidecar, never the tracker |
+| `token` | `str` (REQUIRED on intent statuses; optional elsewhere) | the recovery token AS POSTED (round 7 P2-2) — recovery reads use the stored value verbatim, never a recompute from live config |
 
 **States & transitions** (writer: the apply loop only):
 
@@ -97,9 +98,12 @@ Apply-time adjustments (R4, surfaced in the report, never errors):
 record `dismissed`); `resolve` → **record-only** when already human-closed; `get_state` not-found (issue deleted repo-side) → still-stale rows become **create** (new lifecycle), resolved rows become record-only — surfaced in the report, never a crash.
 
 **Evaluation signal** (R8): the plan is built with an `evaluated` flag from
-`freshness_evaluated(cfg, issues)` on the SAME engine run — `checks.citations_fresh`
+`freshness_evaluated(cfg, issues, extras)` on the SAME engine run — `checks.citations_fresh`
 enabled AND no structurally-flagged indeterminate `citations_fresh` note AND no
-failure-severity `citations_resolve` finding. Per-run coarse: when False, every would-be
+failure-severity `citations_resolve` finding AND no malformed-front-matter source in
+`ValidationExtras.malformed_sources` (round 7 P2-3: a non-finding side-channel `validate()`
+fills only when the caller passes a container — validate/gate output stays byte-identical
+for repos that never opted in, FR-001/SC-001). Per-run coarse: when False, every would-be
 resolve becomes the explicit preserve-skip above; facts present in the run stay live.
 
 **Sidecar write discipline**: atomic rewrite (tmp + replace) after EACH successful row — a
@@ -127,6 +131,7 @@ every existing config file stays valid.
 |---|---|
 | `get_state(repo, number) -> str` | `open` \| `closed`; an issue 404 is disambiguated with ONE bounded repo probe (round 6 P1-1) — repo reachable → `IssueNotFound` (genuine deletion), repo unreachable → plain `EmissionError` (access failure, row untouched); other failures → `EmissionError` |
 | `find_by_marker(repo, marker) -> int \| None` | ONE bounded repo-scoped search for the deterministic body marker (R10 recovery); failure → `EmissionError` |
+| `find_by_marker_in_recent(repo, marker) -> int \| None` | the search-lag fallback (round 7 P2-1): recent-first scan of the real-time issues LIST endpoint, bounded to 2×100; failure → `EmissionError` |
 | `has_comment_marker(repo, number, marker) -> bool` | ONE bounded issue-scoped comment scan for the marker (R10 recovery); failure → `EmissionError` |
 | `create(repo, title, body, labels) -> int` | returns issue number |
 | `update_body(repo, number, body) -> None` | overwrite body (emitter owns it, D5) |

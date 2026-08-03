@@ -24,6 +24,11 @@ mirrors:
     pinned_digest: sha256:<64hex>
     current_digest: sha256:<64hex>
     status: open        # open | creating | resolving | dismissing | resolved | dismissed
+    token: <32-hex>     # REQUIRED on intent statuses (creating/resolving/dismissing): the
+                        # recovery token AS POSTED, persisted at intent time so recovery
+                        # never recomputes from live (mutable) config — a namespace change
+                        # mid-intent must not miss its own marker (round 7 P2-2). Optional
+                        # on settled records (retained for forensics; nothing reads it).
 ```
 
 ## Rules
@@ -32,6 +37,10 @@ mirrors:
   citation slot. One record per key.
 - **Ordering**: records sorted by key; serialization is deterministic — an idempotent re-run
   rewrites byte-identical content.
+- **Token** (round 7 P2-2): intent records carry the token as posted; recovery reads use the
+  STORED value verbatim (fresh emissions compute from current config). A missing token on an
+  intent record is a typed `IssuesFileError` — a lenient default would force a live-config
+  recompute, the exact drift-duplication bug.
 - **Lifecycle** (round 5 P1): the ordinal is sourced from the SIDECAR (the retained
   predecessor record), never from tracker state; the emitter's body/comment marker embeds it
   (`… token=<32-hex> … lifecycle=N -->`; recovery reads match on the fixed-length token — round 6 P2), and recovery adoption additionally VERIFIES the found issue's state

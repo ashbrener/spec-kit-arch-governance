@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -84,6 +84,20 @@ class Issue:
     def render(self) -> str:
         loc = f"  ({self.where})" if self.where else ""
         return f"  [{self.check}] {self.detail}{loc}"
+
+
+@dataclass
+class ValidationExtras:
+    """Side-channel outputs of a validate run that are NOT findings (slice 007,
+    round 7 P2-3). Consumed only by the issues emitter; default-None callers get
+    byte-identical reports (FR-001/SC-001) — nothing here ever becomes an Issue.
+
+    `malformed_sources`: citing files whose front-matter block exists but does not
+    parse (R8's harvest layer) — their citations could not be HARVESTED, so the
+    emitter treats the run as not determinately evaluated and preserves mirrors.
+    """
+
+    malformed_sources: list[str] = field(default_factory=list)
 
 
 # ──────────────────────────── parsing ────────────────────────────
@@ -396,8 +410,7 @@ def check_governance_adopted(repo_root, adr_dir, governance_adr) -> list[Issue]:
     return []
 
 
-def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_index, spec_index,
-                          malformed_sources=()) -> list[Issue]:
+def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_index, spec_index) -> list[Issue]:
     """The sixth check (slice 006): pinned citations still match the cited artifact's
     current content state. Strictly read-only — it NEVER writes pins (FR-011).
 
@@ -407,18 +420,12 @@ def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_inde
     `citations_resolve` stays silent here — the resolve failure owns its story (FR-009);
     if that check is disabled, nobody owns it, so it degrades to an indeterminate note.
 
-    `malformed_sources` (slice 007 R8's harvest layer): citing files whose front
-    matter exists but does not parse. Their citations could not be HARVESTED — a
-    cannot-evaluate state, never "citations absent" — so each gets an indeterminate
-    note (flagged structurally), which keeps the emitter from reading the missing
-    facts as confirmed resolutions.
+    Malformed-front-matter citing files are NOT reported here (round 7 P2-3): that
+    signal travels through `ValidationExtras.malformed_sources` — outside the
+    findings list — so a repo that never opted into the emitter keeps byte-identical
+    reports (FR-001/SC-001).
     """
     out: list[Issue] = []
-    for src in malformed_sources:
-        out.append(Issue("citations_fresh",
-                         f"front matter of {src} could not be parsed — the freshness of "
-                         f"its citations cannot be evaluated this run",
-                         src, severity="note", indeterminate=True))
     try:
         pins = P.load_pins(repo_root)
     except P.PinLoadError as exc:
@@ -505,7 +512,7 @@ def coverage_report(cfg: GovernanceConfig, repo_root: Path) -> list[Issue]:
     return out
 
 
-def validate(cfg: GovernanceConfig, repo_root: Path):
+def validate(cfg: GovernanceConfig, repo_root: Path, extras: ValidationExtras | None = None):
     this_adrs, adr_index, spec_index = build_indexes(cfg, repo_root)
     malformed_sources: list[str] = []
     cits = scan_citations(repo_root, cfg.specs_dir, cfg.citation_keys, cfg.namespace,
@@ -516,14 +523,18 @@ def validate(cfg: GovernanceConfig, repo_root: Path):
         "citations_current": lambda: check_citations_current(cits, adr_index),
         "adr_immutability": lambda: check_adr_immutability(this_adrs, repo_root),
         "governance_adopted": lambda: check_governance_adopted(repo_root, cfg.adr_dir, cfg.governance_adr),
-        "citations_fresh": lambda: check_citations_fresh(cfg, repo_root, cits, adr_index,
-                                                         spec_index, malformed_sources),
+        "citations_fresh": lambda: check_citations_fresh(cfg, repo_root, cits, adr_index, spec_index),
     }
     issues: list[Issue] = []
     for name, fn in runners.items():
         if getattr(cfg.checks, name):
             issues.extend(fn())
     issues.extend(coverage_report(cfg, repo_root))   # advisory notes; never fail (see coverage_report)
+    if extras is not None:
+        # round 7 P2-3: the harvest-failure signal travels OUTSIDE the findings —
+        # only an emitter that passed a container ever sees it; every other caller
+        # gets byte-identical output (FR-001/SC-001).
+        extras.malformed_sources = malformed_sources
     return issues, {"adrs": len(this_adrs), "citations": len(cits)}
 
 

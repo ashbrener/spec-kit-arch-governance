@@ -96,7 +96,9 @@ The tracker is unreachable, the operator's credential is missing, or the API rat
   issue without its audit trail.
 - The sidecar write fails AFTER a remote effect (issue created, note posted) — disk full,
   permissions: the persisted intent state (`creating`/`dismissing`/`resolving`, written BEFORE
-  the effect) makes the retry reconcile with ONE bounded marker read instead of duplicating —
+  the effect) makes the retry reconcile with bounded marker reads (the search probe, falling
+  back to a bounded recent-first scan of the real-time issues list when the search index has
+  not yet caught up) instead of duplicating —
   no duplicate issue, no double-posted comment; an intent whose effect provably never happened
   is cleared, never left as a ghost record.
 - A very long namespace/value/citing path would push the title past GitHub's 256-character

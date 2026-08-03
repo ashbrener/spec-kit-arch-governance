@@ -137,7 +137,16 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   absent". The scan reports such files through an additive side-channel (harvested citations
   and every other check's findings stay byte-identical), and `citations_fresh` emits one
   structurally-flagged indeterminate note per file — so `freshness_evaluated` goes False and
-  every would-be resolve becomes the explicit preserve-skip. Blast radius is deliberately
+  every would-be resolve becomes the explicit preserve-skip. Round 7 P2-3 moved the signal
+  OUT of the findings list: the note-based channel leaked new report text into every validate
+  run — violating FR-001/SC-001's byte-identical-when-absent guarantee for repos that never
+  opted in (no pre-007 fixture had malformed front matter, so the suite could not catch it).
+  The harvest-failure list now travels through `ValidationExtras`, an optional side-channel
+  container `validate()` fills only when the caller passes one; the emitter passes it and
+  feeds `freshness_evaluated` from it (one engine run preserved), and the operator-visible
+  signal lives in the EMITTER's plan output (`skip … freshness not evaluated`), where it
+  belongs. The pin-file and per-citation indeterminate NOTES remain findings — they existed in
+  006's output already; only the NEW front-matter channel moved. Blast radius is deliberately
   WHOLE-RUN, consistent with this decision's per-run-coarse granularity. "Malformed" keys on
   the OPENING delimiter, detected independently of the full-block regex (round 6 P1-2): a file
   that opens `---` but never validly terminates the block — a lost or damaged closing
@@ -214,10 +223,16 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   apply start (rejected: unbounded, and R3 already rejected tracker-driven planning);
   transactional write-ahead files outside the sidecar (rejected: a second state file with the
   same failure mode, no marker needed anyway).
-- **Caveat, recorded honestly**: `find_by_marker` uses the tracker's search surface, which can
-  index-lag a just-created issue. A probe that false-misses re-creates — the pre-R10 behavior,
-  now confined to the crash+immediate-retry+index-lag corner. The adopt path records the found
-  number verbatim; a fact that moved since the intent updates on the next run.
+- **Caveat — CLOSED in round 7 (P2-1)**: `find_by_marker` uses the tracker's search surface,
+  which can index-lag a just-created issue; R10 originally accepted the false-miss re-create in
+  the crash+immediate-retry corner. Now a search miss falls back to ONE authoritative read that
+  does not depend on the search index: the real-time issues LIST endpoint, recent-first,
+  bounded to `_LIST_RECOVERY_PAGES` (2) pages of 100 — an interrupted create happened on the
+  PREVIOUS apply run, so it is recent by construction and the 200-most-recent bound is generous
+  while never approaching a full listing (PRs in the list simply never match the token).
+  Search-hit → existing path; search-miss + list-hit → adopt; both miss → create, now safe.
+  The adopt path records the found number verbatim; a fact that moved since the intent updates
+  on the next run.
 - **Lesson (review round 4, P1)**: the fake satisfying the protocol is not evidence the
   production twin does — `GhTransport` shipped without the recovery reads while every test
   injected `FakeTransport`. Conformance is now asserted STRUCTURALLY: the protocol is
@@ -257,6 +272,15 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   query length is bounded regardless of identity size. The human-readable identity stays in
   the marker for forensics and in the body fields; determinism per (fact, lifecycle) holds
   (D5 refinement).
+- **Round 7 P2-2 — recovery uses the token AS POSTED, never a recompute**: the token derives
+  from config (`namespace`), and config can mutate while an intent is pending — a recovery that
+  recomputed from live config would miss its own marker and duplicate. Every intent write
+  (`creating`/`resolving`/`dismissing`) persists the computed `token` on the sidecar record;
+  every recovery read uses the STORED token verbatim. Fresh emissions still compute from
+  current config. This makes recovery immune to ANY config-derived-token drift, not just
+  namespace changes. The loader REQUIRES the token on intent-status records (the
+  no-lenient-default precedent); settled records may retain it for forensics — nothing reads
+  it there.
 
 ## R11 — Resolution-detail classification via the current citation set (review round 3, P2-3)
 
