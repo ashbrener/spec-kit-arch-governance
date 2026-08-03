@@ -1549,6 +1549,60 @@ def test_mirror_file_requires_token_on_intent_records(tmp_path):
     assert ISS.load_mirrors(tmp_path)[_rec().key].token is None
 
 
+# ═══ Review round 10 — P1: recovery tokens are validated by SHAPE, not presence ═══
+# A token is a load-bearing remote-mutation identifier: a merge-damaged value like
+# "governance" would substring-match an UNRELATED issue and adopt/comment/close it.
+
+@pytest.mark.parametrize("bad_token", [
+    "a" * 8,                     # too short
+    "a" * 40,                    # too long
+    "z" * 32,                    # non-hex
+    "AB" * 16,                   # uppercase hex — not the generated form
+    "governance",                # common word — the substring-match disaster
+    "a" * 31 + "G",              # one bad char, anchored-end check
+])
+@pytest.mark.parametrize("status,issue", [
+    ("creating", None), ("resolving", 42), ("dismissing", 42),   # required + shaped
+    ("open", 42), ("resolved", 42), ("dismissed", 42),           # retained → same contract
+])
+def test_loader_rejects_malformed_tokens_everywhere(tmp_path, status, issue, bad_token):
+    ISS.write_mirrors(tmp_path, [_rec(status=status, issue=issue, token="a" * 32)])
+    doc = yaml.safe_load((tmp_path / ISS.MIRROR_FILE).read_text())
+    doc["mirrors"][0]["token"] = bad_token
+    (tmp_path / ISS.MIRROR_FILE).write_text(yaml.safe_dump(doc))
+    with pytest.raises(ISS.IssuesFileError):
+        ISS.load_mirrors(tmp_path)
+
+
+def test_loader_accepts_valid_tokens_on_every_status(tmp_path):
+    for status, issue in (("creating", None), ("resolving", 42), ("dismissing", 42),
+                          ("open", 42), ("resolved", 42), ("dismissed", 42)):
+        ISS.write_mirrors(tmp_path, [_rec(status=status, issue=issue, token="0af9" * 8)])
+        assert ISS.load_mirrors(tmp_path)[_rec().key].token == "0af9" * 8   # round-trips
+
+
+def test_probe_layer_guards_token_shape_even_when_handed_directly(tmp_path):
+    """Defense-in-depth: a future loader relaxation must not reopen the hole —
+    the recovery paths validate the token before building ANY tracker query."""
+    with pytest.raises(ISS.EmissionError):
+        ISS._require_token(_rec(status="creating", issue=None, token="governance"))
+    assert ISS._require_token(_rec(status="creating", issue=None, token="b" * 32)) == "b" * 32
+    # and end-to-end: a hand-built in-memory record (loader bypassed) never
+    # reaches the transport
+    src, build, cfg, root, facts, k = _one_stale_enabled(tmp_path)
+    bad = {k: ISS.MirrorRecord(citing=k[0], relation=k[1], value=k[2],
+                               repo="acme/widgets", issue=None,
+                               pinned_digest="sha256:" + "a" * 64,
+                               current_digest="sha256:" + "b" * 64,
+                               status="creating", lifecycle=1, token="governance")}
+    t = FakeTransport()
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t, mirrors=bad)
+    assert t.of("find_by_marker") == []                # no query was ever built
+    assert t.of("find_by_marker_in_recent") == []
+    assert t.calls == []
+
+
 # ═══ Review round 7 — P2-3: the malformed-FM signal never touches validate output ═══
 
 def test_malformed_fm_never_changes_validate_output_when_emitter_absent(tmp_path, capsys):

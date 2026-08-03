@@ -37,10 +37,19 @@ mirrors:
   citation slot. One record per key.
 - **Ordering**: records sorted by key; serialization is deterministic — an idempotent re-run
   rewrites byte-identical content.
-- **Token** (round 7 P2-2, completed round 8 P2-1): intent records carry the token as posted;
-  recovery READS use the stored value verbatim, and recovery-path COMMENTS render their marker
-  from the stored value too — check and post share one token source by construction (fresh
-  emissions compute from current config and persist before posting). A missing token on an
+- **Token** (round 7 P2-2, completed round 8 P2-1, shape-validated round 10 P1): intent
+  records carry the token as posted; recovery READS use the stored value verbatim, and
+  recovery-path COMMENTS render their marker from the stored value too — check and post share
+  one token source by construction (fresh emissions compute from current config and persist
+  before posting). The token's EXACT generated shape is validated wherever one is carried:
+  precisely 32 lowercase hex characters (`^[0-9a-f]{32}$`, anchored both ends). Tokens are
+  load-bearing remote-mutation identifiers — a merge-damaged common-word value would
+  substring-match an UNRELATED tracker issue at recovery time — so a malformed token is a
+  typed `IssuesFileError` (exit 2, before any planning or tracker access) on intent records
+  AND on settled records that retain one for forensics: the retained value obeys the same
+  contract, never silently carried. The recovery paths additionally re-validate the shape
+  before building any search/list/comment query (defense-in-depth: a future loader relaxation
+  cannot reopen the hole). A missing token on an
   intent record is a typed `IssuesFileError` — a lenient default would force a live-config
   recompute, the exact drift-duplication bug.
 - **Lifecycle** (round 5 P1): the ordinal is sourced from the SIDECAR (the retained

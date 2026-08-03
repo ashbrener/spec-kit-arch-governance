@@ -311,6 +311,14 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   machinery already lands both directions on the ratified semantics. The full matrix: not
   found / deleted → intent cleared; found + not-evaluated → adopt open, defer; found open +
   evaluated → adopt + same-run resolution; found closed + evaluated → adopt + record-only.
+- **Round 10 P1 — tokens are validated by VALUE, not presence**: a merge-damaged `creating`
+  record with token `governance` sailed through the presence check, and recovery would have
+  substring-searched the tracker for that common word — adopting, commenting on, or closing an
+  UNRELATED issue. The loader validates the exact generated form (`^[0-9a-f]{32}$`) on every
+  record carrying a token (intents where it is required AND settled records retaining one for
+  forensics — same contract), malformed → typed `IssuesFileError`, exit 2, before any tracker
+  access; and the recovery paths re-validate through `_require_token` before building any
+  query (structural defense-in-depth — a future loader relaxation cannot reopen the hole).
 
 ## R11 — Resolution-detail classification via the current citation set (review round 3, P2-3)
 

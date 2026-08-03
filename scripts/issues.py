@@ -59,6 +59,11 @@ MIRROR_FILE = ".spec-arch-issues.yml"
 _STATUSES = ("open", "creating", "resolving", "dismissing", "resolved", "dismissed")
 _DISPOSITIONS = ("create", "update", "resolve", "up-to-date", "skip")
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# The exact generated form of a recovery token (round 10 P1): precisely 32
+# lowercase hex chars, anchored both ends. Tokens are load-bearing REMOTE-MUTATION
+# identifiers — a merge-damaged value like "governance" would substring-match an
+# unrelated issue and adopt/comment/close it. Value validation, not just presence.
+_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 # ──────────────────────────── staleness facts (D1/R2) ────────────────────────────
@@ -199,8 +204,18 @@ def _validate_record(r: MirrorRecord) -> None:
             raise IssuesFileError(f"mirror for {r.value!r} is an intent ({r.status}) "
                                   f"but has no stored 'token' — recovery cannot match "
                                   f"the posted marker")
-    elif r.token is not None and not isinstance(r.token, str):
-        raise IssuesFileError(f"mirror for {r.value!r} has a non-string 'token'")
+        if not _TOKEN_RE.match(r.token):
+            # round 10 P1: value validation before any tracker access — a malformed
+            # token would substring-match an UNRELATED issue at recovery time.
+            raise IssuesFileError(f"mirror for {r.value!r} ({r.status}) has a malformed "
+                                  f"'token' {r.token!r} (want exactly 32 lowercase hex "
+                                  f"chars) — refusing before any tracker lookup")
+    elif r.token is not None and (not isinstance(r.token, str)
+                                  or not _TOKEN_RE.match(r.token)):
+        # retained-for-forensics tokens obey the SAME shape contract (round 10 P1):
+        # a malformed retained value is corruption, never silently carried.
+        raise IssuesFileError(f"mirror for {r.value!r} has a malformed retained "
+                              f"'token' {r.token!r} (want exactly 32 lowercase hex chars)")
     if not isinstance(r.lifecycle, int) or isinstance(r.lifecycle, bool) or r.lifecycle < 1:
         # REQUIRED (round 5 P1): the branch is unreleased, so no lenient default —
         # a missing/invalid lifecycle is corruption, and defaulting it could scope a
@@ -338,6 +353,21 @@ def _record_marker(namespace: str, record: MirrorRecord) -> str:
     return (f"<!-- {namespace}-governance issues v1 token={token} "
             f"key={record.citing}|{record.relation}|{record.value} "
             f"lifecycle={record.lifecycle} -->")
+
+
+def _require_token(record: MirrorRecord) -> str:
+    """Defense-in-depth at the USE site (round 10 P1): validate the recovery
+    token's exact generated shape before building ANY search/list/comment query —
+    a second, structural line beneath the loader's validation, so a future loader
+    relaxation cannot reopen the hole. A malformed token here is a typed failure
+    (exit 1), never a tracker query that could substring-match an unrelated issue."""
+    token = record.token
+    if not isinstance(token, str) or not _TOKEN_RE.match(token):
+        raise EmissionError(
+            f"mirror for {record.value!r} ({record.status}) carries a malformed "
+            f"recovery token {token!r} (want exactly 32 lowercase hex chars) — "
+            f"refusing to query the tracker with it; repair {MIRROR_FILE} and re-run")
+    return token
 
 
 # GitHub caps issue titles at 256 characters (bodies at 65536 — our bodies are a few
@@ -895,7 +925,7 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                                      "will not re-open") -> None:
         # R10 recovery: the note may or may not have posted — ONE bounded,
         # issue-scoped marker check decides; never a second note.
-        if not transport.has_comment_marker(rec.repo, rec.issue, rec.token):
+        if not transport.has_comment_marker(rec.repo, rec.issue, _require_token(rec)):
             # round 8 P2-1: post the SAME token the check just missed — from the
             # record, never recomputed (a namespace flip must not split them)
             transport.comment(rec.repo, rec.issue,
@@ -955,11 +985,12 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                 # closed issue can never match). Adoption VERIFIES the found
                 # issue's state against the intent being recovered — never a
                 # silent adopt into `open`.
-                found = transport.find_by_marker(rec.repo, rec.token)
+                token = _require_token(rec)
+                found = transport.find_by_marker(rec.repo, token)
                 if found is None:
                     # round 7 P2-1: search is index-lagged; the recent LIST is
                     # real-time — one bounded fallback before trusting the miss
-                    found = transport.find_by_marker_in_recent(rec.repo, rec.token)
+                    found = transport.find_by_marker_in_recent(rec.repo, token)
                 if found is not None:
                     try:
                         state = transport.get_state(rec.repo, found)
@@ -1024,9 +1055,10 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                 # record `open` and claim nothing (round 9 P2-2) — the next
                 # determinate apply classifies through the normal machinery
                 # (reality check → dismissed, or resolve path → resolved).
-                found = transport.find_by_marker(rec.repo, rec.token)
+                token = _require_token(rec)
+                found = transport.find_by_marker(rec.repo, token)
                 if found is None:
-                    found = transport.find_by_marker_in_recent(rec.repo, rec.token)
+                    found = transport.find_by_marker_in_recent(rec.repo, token)
                 if found is None:
                     erase(row.key)
                     report.append(_audit("recorded", row, None,
@@ -1098,7 +1130,8 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                 if rec.status == "resolving":
                     # retry entry: marker-check with the STORED token before ever
                     # re-posting (rounds 7/8), then complete the close
-                    if not transport.has_comment_marker(rec.repo, rec.issue, rec.token):
+                    if not transport.has_comment_marker(rec.repo, rec.issue,
+                                                        _require_token(rec)):
                         transport.comment(rec.repo, rec.issue,
                                           render_resolution_comment(rec, row.detail, ns))
                     transport.close(rec.repo, rec.issue)
