@@ -59,7 +59,7 @@ of `.spec-arch-issues.yml`. Enforcement (gate, flip guard) needs zero changes.
 
 - [X] T017 [P] Register the verb: `extension.yml` gains `speckit.arch-governance.issues` under `provides.commands`, version 1.1.0 → 1.2.0; new `commands/issues.md` (mirror `commands/repin.md` shape: what it does, dry-run/apply, exit codes, lifecycle table).
 - [X] T018 [P] Docs: README.md (six checks + the issues mirror section), DESIGN.md (emitter architecture: one engine two consumers, offline plan, transport seam), `config.example.yml` (documented `issues:` block, default-disabled, with the same long-comment style), CHANGELOG.md (1.2.0 entry).
-- [ ] T019 Dogfood + full verify: `uv run pytest` green (pre-007 tests unmodified — SC-001 proof); `uv run python scripts/validate.py .` PASS; `uv run python scripts/issues.py .` on this repo prints the honest not-enabled no-op; `uv run python scripts/repin.py . --apply` pins plan.md's ARCH-ADR-000 citation; grep confirms no test imports/invokes `gh` or opens a socket.
+- [X] T019 Dogfood + full verify: `uv run pytest` green (pre-007 tests unmodified — SC-001 proof); `uv run python scripts/validate.py .` PASS; `uv run python scripts/issues.py .` on this repo prints the honest not-enabled no-op; `uv run python scripts/repin.py . --apply` pins plan.md's ARCH-ADR-000 citation; grep confirms no test imports/invokes `gh` or opens a socket.
 
 ## Dependencies
 
