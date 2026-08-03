@@ -67,6 +67,12 @@ class Issue:
     detail: str
     where: str = ""
     severity: str = "fail"   # fail | note
+    # Slice 007 (D1): the machine face of a determinate citations_fresh staleness
+    # finding — an issues.StalenessFact, attached ONLY by the stale-pin branch of
+    # check_citations_fresh. Default None keeps every existing constructor and
+    # consumer (report, gate, flip guard) byte-identical; only the issues emitter
+    # reads it. Typed loosely to avoid a module import cycle (issues imports us).
+    fact: object = None
 
     def render(self) -> str:
         loc = f"  ({self.where})" if self.where else ""
@@ -385,10 +391,19 @@ def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_inde
                              f"{c.relation} {c.raw!r}: freshness indeterminate — {t.reason}",
                              c.source, severity="note"))
         elif t.digest != pin.digest:
+            # Slice 007 (D1/R2): the ONE fact-attachment site. The structured fact rides
+            # the same Issue the enforcement path already consumes — one engine, two
+            # consumers — so the fact set and the finding set can never diverge. The
+            # import is deferred (issues.py imports this module at its top level).
+            from issues import StalenessFact
             out.append(Issue("citations_fresh",
                              f"{c.relation} {c.raw!r} is STALE — {t.display} changed since it was "
                              f"pinned (pinned {P.abbrev(pin.digest)}, current {P.abbrev(t.digest)}); "
-                             f"review the upstream change, then `repin`", c.source))
+                             f"review the upstream change, then `repin`", c.source,
+                             fact=StalenessFact(relation=c.relation, value=c.raw,
+                                                citing=c.source, cited_display=t.display,
+                                                pinned_digest=pin.digest, pinned_date=pin.pinned,
+                                                current_digest=t.digest)))
     for k in sorted(pins):
         if k not in keys_seen:
             pin = pins[k]
