@@ -456,14 +456,17 @@ def test_apply_report_has_one_audit_line_per_executed_row(tmp_path):
         assert "#10" in line                                       # the issue reference
 
 
-def test_apply_up_to_date_rows_touch_nothing(tmp_path):
+def test_apply_up_to_date_rows_reality_check_but_mutate_nothing(tmp_path):
+    """Round 2 P2-1: EVERY live mirror gets an apply-time get_state — including
+    unchanged ones — but an issue that is still open mutates nothing."""
     _, build, cfg, root, facts = _stale_pair(tmp_path)
     _apply(build, cfg, root, facts, FakeTransport())
     before = (build / ISS.MIRROR_FILE).read_bytes()
     t = FakeTransport()
     rows, report, mutated = _apply(build, cfg, root, facts, t)
     assert [r.disposition for r in rows] == ["up-to-date", "up-to-date"]
-    assert t.calls == [] and report == [] and not mutated
+    assert {c[0] for c in t.calls} == {"get_state"} and len(t.calls) == 2
+    assert report == [] and not mutated                    # nothing executed, nothing said
     assert (build / ISS.MIRROR_FILE).read_bytes() == before        # byte-identical (SC-002)
 
 
@@ -476,7 +479,8 @@ def test_rerun_with_unchanged_facts_creates_nothing_sidecar_byte_identical(tmp_p
     t = FakeTransport()
     rows, report, mutated = _apply(build, cfg, root, facts, t)
     assert {r.disposition for r in rows} == {"up-to-date"}
-    assert t.calls == [] and not mutated                   # 0 new issues, 0 mutations (SC-002)
+    assert {c[0] for c in t.calls} <= {"get_state"}        # reality check only (round 2 P2-1)
+    assert not mutated                                     # 0 new issues, 0 mutations (SC-002)
     assert (build / ISS.MIRROR_FILE).read_bytes() == before
 
 
@@ -745,6 +749,158 @@ def test_resolution_detail_distinguishes_repin_revert_and_removal(tmp_path):
     assert "removed" in ISS._resolution_detail(rec, {})
     # no pin knowledge at all (malformed pin file) → honest generic
     assert ISS._resolution_detail(rec, None) == "no longer stale"
+
+
+# ═══ Review round 2 — P2-1: every live mirror gets an apply-time reality check ═══
+# An up-to-date row (fact present, digests unchanged) must still reconcile tracker
+# state at apply time — else a human closure (or deletion) with a quiet upstream is
+# never noticed: no dismissal note ever posts and a deleted issue is never replaced.
+
+def test_unchanged_mirror_human_closed_is_dismissed_at_apply(tmp_path):
+    src, build, k = _mirrored_stale(tmp_path)          # open mirror #101, still stale
+    cfg, root = V.load_config(build)                   # upstream NEVER moves again
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    t = FakeTransport()
+    t.states[101] = "closed"                           # human closed it meanwhile
+    rows, report, mutated = _apply(build, cfg, root, facts, t)
+    assert [r.disposition for r in rows] == ["up-to-date"]   # dry-run plan stays offline
+    comments = t.of("comment")
+    assert len(comments) == 1 and "still stale" in comments[0][3]   # the one-time note
+    assert t.of("close") == [] and t.of("update_body") == []        # never re-opened
+    assert mutated
+    assert _mirrors(build)[k].status == "dismissed"
+    assert len(report) == 1 and "dismissed" in report[0]
+    assert "will not re-open" in report[0]
+    # the next apply is quiet — dismissed mirrors get no reality check
+    t2 = FakeTransport()
+    _, report2, mutated2 = _apply(build, cfg, root, facts, t2)
+    assert t2.calls == [] and report2 == [] and not mutated2
+
+
+def test_unchanged_mirror_deleted_issue_is_recreated_at_apply(tmp_path):
+    src, build, k = _mirrored_stale(tmp_path)          # open mirror #101, still stale
+    cfg, root = V.load_config(build)                   # upstream never moves again
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    t = FakeTransport()
+    t.states[101] = "missing"                          # deleted repo-side
+    t.next_number = 888
+    rows, report, _ = _apply(build, cfg, root, facts, t)
+    assert [r.disposition for r in rows] == ["up-to-date"]
+    assert len(t.of("create")) == 1                    # fresh issue, new lifecycle
+    rec = _mirrors(build)[k]
+    assert rec.status == "open" and rec.issue == 888
+    assert len(report) == 1 and "deleted repo-side" in report[0]   # surfaced explicitly
+
+
+def test_reality_check_skips_non_live_rows(tmp_path):
+    """Resolved-retained and freshness-preserved skip rows get NO get_state — the
+    reconciliation is bounded to one call per LIVE (open) mirror."""
+    src, build, k = _mirrored_stale(tmp_path)
+    assert R.main([str(build), "--apply"]) == 0        # resolve the fact…
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t = FakeTransport()
+    t.states[101] = "open"
+    _apply(build, cfg, root, ISS.staleness_facts(issues), t)
+    assert _mirrors(build)[k].status == "resolved"     # …lifecycle completed
+    t2 = FakeTransport()
+    rows, report, mutated = _apply(build, cfg, root, [], t2)
+    assert [r.disposition for r in rows] == ["up-to-date"]   # retained for audit
+    assert t2.calls == [] and report == [] and not mutated   # no reality check
+
+
+# ═══ Review round 2 — P2-2: resolution retry never duplicates the audit comment ═══
+# comment-then-close straddles a failure seam: the intermediate `resolving` status is
+# persisted BETWEEN the two transport mutations, so a retry completes the close
+# without re-commenting (FR-009's partial-success contract at sub-row granularity).
+
+def _resolving(tmp):
+    """Drive a mirrored fact to the `resolving` intermediate state: audit comment
+    posted, close failed. Returns (src, build, k, cfg, root, facts)."""
+    src, build, k = _mirrored_stale(tmp)
+    assert R.main([str(build), "--apply"]) == 0        # the author repins — resolved
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    t = FakeTransport()
+    t.states[101] = "open"
+    t.fail["close"] = ISS.EmissionError("HTTP 502: transient")
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)
+    assert len(t.of("comment")) == 1                   # the audit comment DID post
+    assert ISS.load_mirrors(build)[k].status == "resolving"
+    return src, build, k, cfg, root, facts
+
+
+def test_close_failure_persists_resolving_and_retry_never_recomments(tmp_path):
+    src, build, k, cfg, root, facts = _resolving(tmp_path)
+    assert ISS.load_mirrors(build)[k].status == "resolving"   # sub-row state persisted
+    t2 = FakeTransport()
+    t2.states[101] = "open"
+    rows, report, _ = _apply(build, cfg, root, facts, t2)
+    assert t2.of("comment") == []                      # ZERO new comments
+    assert len(t2.of("close")) == 1                    # exactly the pending close
+    assert _mirrors(build)[k].status == "resolved"
+    assert len(report) == 1 and "resolved" in report[0]
+    # …and the run after that is a pure audit row
+    t3 = FakeTransport()
+    _, report3, mutated3 = _apply(build, cfg, root, facts, t3)
+    assert t3.calls == [] and report3 == [] and not mutated3
+
+
+def test_resolving_record_found_closed_or_deleted_is_record_only(tmp_path):
+    src, build, k, cfg, root, facts = _resolving(tmp_path)
+    t2 = FakeTransport()
+    t2.states[101] = "closed"                          # human closed it meanwhile
+    rows, report, _ = _apply(build, cfg, root, facts, t2)
+    assert t2.of("comment") == [] and t2.of("close") == []
+    assert _mirrors(build)[k].status == "resolved"
+    assert len(report) == 1 and "recorded" in report[0]
+
+
+def test_restale_fact_with_pending_close_completes_the_old_lifecycle_first(tmp_path):
+    src, build, k, cfg, root, _ = _resolving(tmp_path)
+    (src / "specs" / "005-fund-model" / "spec.md").write_text(
+        UPSTREAM_SPEC.replace("v1", "v7"))             # stale AGAIN while close pending
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    assert len(facts) == 1
+    t = FakeTransport()
+    t.states[101] = "open"
+    rows, report, _ = _apply(build, cfg, root, facts, t)
+    by_key = {r.key: r for r in rows}
+    assert by_key[k].disposition == "resolve"          # complete the pending close first
+    assert "pending close" in by_key[k].detail
+    assert t.of("comment") == [] and len(t.of("close")) == 1
+    assert t.of("create") == []                        # new lifecycle starts NEXT run
+    assert _mirrors(build)[k].status == "resolved"
+    # next run: the still-stale fact opens its new issue
+    t2 = FakeTransport()
+    t2.next_number = 300
+    rows2, _, _ = _apply(build, cfg, root, facts, t2)
+    assert {r.disposition for r in rows2} == {"create"}
+    assert _mirrors(build)[k].issue == 300 and _mirrors(build)[k].status == "open"
+
+
+def test_mirror_file_roundtrips_resolving_status(tmp_path):
+    r = _rec(status="resolving")
+    ISS.write_mirrors(tmp_path, [r])
+    assert ISS.load_mirrors(tmp_path)[r.key].status == "resolving"
+
+
+def test_sidecar_write_failure_is_a_typed_emission_error(tmp_path, capsys, monkeypatch):
+    _, build, cfg, root, facts = _stale_pair(tmp_path)
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ISS, "write_mirrors", boom)
+    assert ISS.main([str(build), "--apply"], transport=FakeTransport()) == 1
+    err = capsys.readouterr().err
+    assert "disk full" in err and ISS.MIRROR_FILE in err   # typed, never a traceback
 
 
 # ═══ Review round 1 — P1: absent-vs-not-evaluated (R8) ═══

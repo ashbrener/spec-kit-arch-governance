@@ -46,7 +46,10 @@ import validate as V  # noqa: E402
 
 MIRROR_FILE = ".spec-arch-issues.yml"
 
-_STATUSES = ("open", "resolved", "dismissed")
+# `resolving` (review round 2, research R9): the sub-row intermediate — the
+# resolution's audit comment posted, the close still pending. Persisted BETWEEN the
+# two transport mutations so a failed close retries WITHOUT re-commenting.
+_STATUSES = ("open", "resolving", "resolved", "dismissed")
 _DISPOSITIONS = ("create", "update", "resolve", "up-to-date", "skip")
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -371,6 +374,14 @@ def issues_plan(facts, mirrors, pins=None, evaluated=True) -> list[PlanRow]:
                 detail += "; stale again after resolution — new lifecycle"
             rows.append(PlanRow("create", f.citing, f.relation, f.value, fact=f,
                                 record=None, detail=detail))
+        elif rec.status == "resolving":
+            # R9: a close is pending from a prior run whose audit comment already
+            # posted — complete THAT lifecycle first; the (re-)stale fact gets its
+            # fresh issue on the next run (one disposition per key per run).
+            rows.append(PlanRow("resolve", f.citing, f.relation, f.value, fact=f, record=rec,
+                                detail="completing pending close (audit comment already "
+                                       "posted); the stale fact starts a new lifecycle "
+                                       "next run"))
         elif rec.status == "dismissed":
             # OQ-C/R5: the human dismissed the FACT — further movement stays quiet.
             rows.append(PlanRow("up-to-date", f.citing, f.relation, f.value, fact=f,
@@ -388,6 +399,12 @@ def issues_plan(facts, mirrors, pins=None, evaluated=True) -> list[PlanRow]:
         if rec.status == "resolved":
             rows.append(PlanRow("up-to-date", rec.citing, rec.relation, rec.value,
                                 record=rec, detail="resolved — retained for audit"))
+        elif rec.status == "resolving":
+            # R9: the resolution was already confirmed (and its audit comment posted)
+            # on a prior DETERMINATE run — completing the pending close does not
+            # depend on this run's evaluation status.
+            rows.append(PlanRow("resolve", rec.citing, rec.relation, rec.value, record=rec,
+                                detail="completing pending close (audit comment already posted)"))
         elif not evaluated:
             # R8: the fact's absence is NOT a confirmed resolution this run.
             rows.append(PlanRow("skip", rec.citing, rec.relation, rec.value, record=rec,
@@ -545,20 +562,59 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
 
     def record(rec: MirrorRecord) -> None:
         mirrors[rec.key] = rec
-        write_mirrors(repo_root, mirrors.values())
+        try:
+            write_mirrors(repo_root, mirrors.values())
+        except OSError as exc:
+            # The emit-then-record seam: the tracker effect happened but the local
+            # record could not be written. Surface as the emitter's own typed
+            # failure (exit 1, actionable) — never a raw traceback (R9 note).
+            raise EmissionError(
+                f"could not record mirror state in {MIRROR_FILE}: {exc}") from exc
+
+    def create_issue(row: PlanRow, f: StalenessFact, note: str) -> None:
+        number = transport.create(target, render_title(f, ns), render_body(f, ns),
+                                  list(cfg.issues.labels))
+        record(MirrorRecord(citing=f.citing, relation=f.relation, value=f.value,
+                            repo=target, issue=number, pinned_digest=f.pinned_digest,
+                            current_digest=f.current_digest, status="open"))
+        report.append(_audit("created", row, number, note))
+
+    def dismiss(row: PlanRow, rec: MirrorRecord, f: StalenessFact) -> None:
+        # OQ-C respect-and-note: exactly ONE comment, never re-open. Digests stay
+        # last-emitted (R5): the body was not updated.
+        transport.comment(rec.repo, rec.issue, render_dismissal_comment(f, ns))
+        record(replace(rec, status="dismissed"))
+        report.append(_audit("dismissed", row, rec.issue,
+                             "closed by operator while still stale — noted, "
+                             "will not re-open"))
 
     for row in rows:
-        if row.disposition in ("up-to-date", "skip"):
+        if row.disposition == "skip":
+            continue
+        if row.disposition == "up-to-date":
+            rec, f = row.record, row.fact
+            # Round 2 P2-1: EVERY live (open) mirror gets an apply-time reality
+            # check — including unchanged ones — else a human closure or deletion
+            # with a quiet upstream is never noticed (no dismissal note, no
+            # replacement). Bounded: one get_state per live mirror, no listing.
+            # Dismissed/resolved/preserved rows stay untouched by design.
+            if rec is None or rec.status != "open" or f is None:
+                continue
+            try:
+                state = transport.get_state(rec.repo, rec.issue)
+            except IssueNotFound:
+                create_issue(row, f, f"recorded issue #{rec.issue} was deleted "
+                                     f"repo-side — new lifecycle")
+                mutated = True
+                continue
+            if state == "closed":
+                dismiss(row, rec, f)
+                mutated = True
             continue
         if row.disposition == "create":
             f = row.fact
             assert f is not None
-            number = transport.create(target, render_title(f, ns), render_body(f, ns),
-                                      list(cfg.issues.labels))
-            record(MirrorRecord(citing=f.citing, relation=f.relation, value=f.value,
-                                repo=target, issue=number, pinned_digest=f.pinned_digest,
-                                current_digest=f.current_digest, status="open"))
-            report.append(_audit("created", row, number, row.detail))
+            create_issue(row, f, row.detail)
             mutated = True
         elif row.disposition == "update":
             f, rec = row.fact, row.record
@@ -567,24 +623,12 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                 state = transport.get_state(rec.repo, rec.issue)
             except IssueNotFound:
                 # deleted repo-side + still stale → a fresh issue (new lifecycle)
-                number = transport.create(target, render_title(f, ns), render_body(f, ns),
-                                          list(cfg.issues.labels))
-                record(MirrorRecord(citing=f.citing, relation=f.relation, value=f.value,
-                                    repo=target, issue=number, pinned_digest=f.pinned_digest,
-                                    current_digest=f.current_digest, status="open"))
-                report.append(_audit("created", row, number,
-                                     f"recorded issue #{rec.issue} was deleted repo-side — "
-                                     f"new lifecycle"))
+                create_issue(row, f, f"recorded issue #{rec.issue} was deleted "
+                                     f"repo-side — new lifecycle")
                 mutated = True
                 continue
             if state == "closed":
-                # OQ-C respect-and-note: exactly ONE comment, never re-open. Digests
-                # stay last-emitted (R5): the body was not updated.
-                transport.comment(rec.repo, rec.issue, render_dismissal_comment(f, ns))
-                record(replace(rec, status="dismissed"))
-                report.append(_audit("dismissed", row, rec.issue,
-                                     "closed by operator while still stale — noted, "
-                                     "will not re-open"))
+                dismiss(row, rec, f)
             else:
                 transport.update_body(rec.repo, rec.issue, render_body(f, ns))
                 record(replace(rec, pinned_digest=f.pinned_digest,
@@ -614,8 +658,14 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                 report.append(_audit("recorded", row, rec.issue,
                                      "already closed; resolution recorded"))
             else:
-                transport.comment(rec.repo, rec.issue,
-                                  render_resolution_comment(rec, row.detail, ns))
+                # R9 sub-row idempotency: the audit comment and the close straddle a
+                # failure seam. Persist the intermediate `resolving` status BETWEEN
+                # them, so a failed close retries WITHOUT re-posting the comment —
+                # FR-009's partial-success contract at sub-row granularity.
+                if rec.status != "resolving":
+                    transport.comment(rec.repo, rec.issue,
+                                      render_resolution_comment(rec, row.detail, ns))
+                    record(replace(rec, status="resolving"))
                 transport.close(rec.repo, rec.issue)
                 record(replace(rec, status="resolved"))
                 report.append(_audit("resolved", row, rec.issue,

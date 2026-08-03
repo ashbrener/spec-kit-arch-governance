@@ -16,7 +16,7 @@ mirrors:
     issue: 42
     pinned_digest: sha256:<64hex>
     current_digest: sha256:<64hex>
-    status: open        # open | resolved | dismissed
+    status: open        # open | resolving | resolved | dismissed
 ```
 
 ## Rules
@@ -33,8 +33,11 @@ mirrors:
   every issue).
 - **Tracked, export-ignored**: committed to git (history = audit trail); `export-ignore`d in
   `.gitattributes` like the pins file (not part of the release archive).
-- **Status semantics**: `open` = emitter-owned live mirror; `resolved` = lifecycle completed
+- **Status semantics**: `open` = emitter-owned live mirror; `resolving` = the resolution's
+  audit comment posted, the close still pending — written BETWEEN the two transport mutations
+  (research R9), so a retry completes the close WITHOUT re-posting the comment (found
+  human-closed or deleted at retry → `resolved` record-only); `resolved` = lifecycle completed
   (retained for audit; a NEW staleness of the same key starts a new lifecycle with a new issue);
   `dismissed` = human closed while stale — the emitter noted once and will neither comment again
   nor re-open (further upstream movement stays quiet; later resolution flips to `resolved`
-  record-only).
+  record-only). An unknown status remains a typed `IssuesFileError` (load rule above).

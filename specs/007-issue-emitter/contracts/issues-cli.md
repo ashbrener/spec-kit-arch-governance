@@ -46,7 +46,12 @@ must never look identical to a resolved world.
 ## Apply report
 
 Plan header, then one line per executed row naming fact, action taken, and issue reference
-(FR-011). Apply-time adjustments are surfaced explicitly:
+(FR-011). At apply time EVERY live (`open`-status) mirror row — including up-to-date ones — is
+reality-checked with one `get_state` (no full listing; R4): an unchanged mirror found still
+open executes nothing and prints no line; one found human-closed while still stale takes the
+respect-and-note path, and one found deleted starts a new lifecycle. A resolve interrupted
+between its audit comment and its close resumes from the persisted `resolving` state without
+re-commenting (R9). Apply-time adjustments are surfaced explicitly:
 
 ```
   dismissed   cites 'ARCH-ADR-003' in specs/006-y/spec.md  #42  (closed by operator while still stale — noted, will not re-open)

@@ -36,7 +36,7 @@ One entry per mirrored fact. File: `version: v1`, records sorted by pin key (det
 | `issue` | `int` | tracker issue number |
 | `pinned_digest` | `str` | last-emitted pinned digest |
 | `current_digest` | `str` | last-emitted current digest |
-| `status` | `str` | `open` \| `resolved` \| `dismissed` |
+| `status` | `str` | `open` \| `resolving` \| `resolved` \| `dismissed` |
 
 **States & transitions** (writer: the apply loop only):
 
@@ -44,8 +44,17 @@ One entry per mirrored fact. File: `version: v1`, records sorted by pin key (det
 - `open` → `open` — apply performed **update** (content state moved; digests refreshed).
 - `open` → `resolved` — apply performed **resolve** (close + audit comment), or found the issue
   already human-closed while the fact is resolved (record-only, no comment).
+- `open` → `resolving` — the resolution's audit comment posted, the close still pending —
+  written BETWEEN the two transport mutations (R9), so a failed close retries WITHOUT
+  re-commenting. `resolving` → `resolved` — the pending close completed (or the issue was found
+  human-closed/deleted: record-only). Completing a pending close ignores the run's R8
+  evaluation status (the resolution was confirmed on a prior determinate run); a fact present
+  again while `resolving` completes the old lifecycle first — its new issue opens next run.
 - `open` → `dismissed` — apply found the issue human-closed while the fact is STILL stale:
-  exactly one continued-staleness comment, never re-open (OQ-C).
+  exactly one continued-staleness comment, never re-open (OQ-C). Detected for EVERY live
+  (`open`) mirror at apply time — including up-to-date rows whose upstream never moved
+  (round 2 P2-1; R4) — and likewise a deleted issue of a still-stale up-to-date mirror
+  starts a new lifecycle.
 - `dismissed` → `resolved` — the fact later resolves: record-only (no comment on a closed issue).
 - `dismissed` stays `dismissed` on further upstream movement (R5): quiet.
 - `resolved` records are retained (audit); a NEW staleness of the same pin key after resolution
@@ -65,8 +74,8 @@ Ordered rows (sorted by pin key), each `(fact-or-record, disposition, detail)`:
 |---|---|---|
 | `create` | fact with no mirror record (or record in `resolved`) | `create` issue → record `open` |
 | `update` | fact + `open` record, content state moved | reality-check → `update_body` (or → dismissed path) |
-| `resolve` | `open` record whose fact is absent from current facts **and freshness was determinately evaluated this run (R8)** | reality-check → `close` + audit comment (or record-only if human-closed) → `resolved` |
-| `up-to-date` | fact + `open` record, content state unchanged; or `dismissed` record still stale | none |
+| `resolve` | `open` record whose fact is absent from current facts **and freshness was determinately evaluated this run (R8)**; or a `resolving` record (pending close, any evaluation status — R9) | reality-check → audit comment → record `resolving` → `close` → `resolved` (record-only if human-closed/deleted; a `resolving` record never re-comments) |
+| `up-to-date` | fact + `open` record, content state unchanged; or `dismissed` record still stale | live (`open`) mirrors: reality-check (`get_state`) → unchanged: none; human-closed + still stale: respect-and-note (`dismissed`); deleted + still stale: create (new lifecycle). Dismissed/resolved rows: none |
 | `skip` | emitter not enabled (dry-run); row excluded with reason; or a live mirror whose fact is absent while freshness was NOT evaluated (check disabled / malformed pin file / indeterminate / citation failing resolution — R8: `freshness not evaluated — mirror preserved`, never a resolve) | none |
 
 Apply-time adjustments (R4, surfaced in the report, never errors):

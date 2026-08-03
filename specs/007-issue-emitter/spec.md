@@ -82,12 +82,18 @@ The tracker is unreachable, the operator's credential is missing, or the API rat
 
 - Upstream moves a second time after mirroring: the fact's identity is unchanged (same citation), the CONTENT changed — update, not duplicate (US2 scenario 2).
 - A human edits the mirrored issue's body: the emitter's next update overwrites only what it owns (deterministic body), per the ratified update semantics; it never deletes an issue.
-- A human closes the issue while the fact is still stale: the dismissal is recorded, one continued-staleness comment is added, and the issue is never re-opened.
+- A human closes the issue while the fact is still stale: the dismissal is recorded, one continued-staleness comment is added, and the issue is never re-opened. Noticed at the
+  next `--apply` even when the upstream never moves again: every live (`open`) mirror is
+  reality-checked at apply time, not only rows being mutated.
 - The mirror record references an issue that no longer exists (deleted repo-side): detectable only at apply time (the offline plan cannot see the tracker); the apply report surfaces it explicitly — still-stale → a fresh issue is created (new lifecycle), resolved → record-only — never a crash.
 - The mirror record file is present-but-broken: typed load error, non-zero exit, no emission — never a guessed-empty state that would duplicate every issue (the pins `PinLoadError` precedent).
 - Two governed repos in one domain both opt in: each mirrors only its OWN staleness facts to its OWN configured tracker; the emitter never emits for a peer.
 - Config enables the emitter but names no tracker repository: config validation error at load time, before any planning.
 - Rate limiting mid-run: the failed emission is reported, successful ones are recorded, re-run resumes (US4 scenario 3).
+- The close fails AFTER the resolution's audit comment posted (rate limit, transient error):
+  the sidecar records the intermediate `resolving` state between the two mutations, so the
+  retry completes the close without re-posting the comment — resumable idempotency at
+  sub-row granularity (FR-009), and never a closed issue without its audit trail.
 - Freshness was NOT determinately evaluated this run (the `citations_fresh` check is disabled, the pin file is malformed, an evaluation is indeterminate, or a citation fails resolution): the absence of a fact is “not evaluated”, never “confirmed resolved” — no mirror is resolved that run. Each preserved mirror surfaces as an explicit `skip (freshness not evaluated — mirror preserved)` plan row — never a silent omission, never a close: a disabled check must never look identical to a resolved world.
 
 ## Requirements *(mandatory)*

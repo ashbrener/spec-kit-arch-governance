@@ -57,13 +57,18 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
 ## R4 — Apply-time reality check, plan-time silence
 
 - **Decision**: dry-run plans purely from (facts, mirrors) and performs zero network calls; the
-  human-closed case (OQ-C) is detected only at apply time via `get_state` on each row that is
-  about to be mutated. Divergences between plan and tracker reality are surfaced in the apply
-  report as adjusted dispositions (`update → dismissed`, `resolve → record-only`), never errors.
+  human-closed case (OQ-C) is detected only at apply time via `get_state` on **every live
+  (`open`-status) mirror row — including up-to-date ones** (review round 2: a mutation-only check
+  would never notice a human closure, or a deletion, whose upstream never moves again — the
+  ratified one-time dismissal note would never post and a deleted issue would never be replaced).
+  Dismissed, resolved, and freshness-preserved rows get no check by design. Divergences between
+  plan and tracker reality are surfaced in the apply report as adjusted dispositions
+  (`update/up-to-date → dismissed`, `resolve → record-only`, deleted → new lifecycle), never
+  errors; an unchanged mirror found still open produces no report line (nothing was executed).
 - **Rationale**: OQ-C requires knowing tracker state, which only exists behind the network line;
-  pulling it into planning would poison SC-005. Checking exactly the rows being mutated bounds
-  the calls (no full listing) and keeps the "one explicit emission call" framing honest: apply is
-  the only networked verb path, and everything it learns it writes down (sidecar `dismissed`).
+  pulling it into planning would poison SC-005. One `get_state` per live mirror bounds the calls
+  (no full listing) and keeps the "one explicit emission call" framing honest: apply is the only
+  networked verb path, and everything it learns it writes down (sidecar `dismissed`).
 - **Alternatives considered**: a `--reconcile` sub-mode doing a full tracker sweep (rejected:
   YAGNI; per-row checks cover every ratified behavior); trusting the sidecar blindly at apply
   (rejected: re-opening or commenting on a human-closed issue is exactly the OQ-C violation).
@@ -135,3 +140,35 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   resolutions (rejected: the exact bug); silently omitting preserved mirrors from the plan
   (rejected: FR-004 assigns every recorded mirror a disposition — an explicit `skip` with the
   reason is the honest row).
+
+## R9 — Sub-row idempotency for the resolve pair: persisted `resolving` (review round 2, P2-2)
+
+- **Decision**: resolve executes comment → close, and the sidecar persists an intermediate
+  status `resolving` BETWEEN the two: after the audit comment succeeds, the record is written
+  `resolving` (comment posted, close pending) before the close is attempted; close success
+  writes `resolved`. A retry that finds `resolving` skips the comment and retries only the
+  close (reality-checked: found closed or deleted → record-only `resolved`). A fact present
+  again while a close is pending completes the OLD lifecycle first (close, `resolved`); its new
+  issue opens on the next run — one disposition per pin key per run. Completing a pending close
+  does not depend on the current run's evaluation status (R8): the resolution was confirmed,
+  and its comment posted, on a prior determinate run.
+- **Rationale**: without the intermediate state, a close failing after the comment succeeded
+  (rate limit, transient 5xx) re-posts the SAME audit comment on every retry — duplicate
+  comments violating FR-009's partial-success contract at sub-row granularity. Persisting the
+  boundary keeps recovery offline-deterministic (no marker-scraping network read — the sidecar,
+  not the tracker, is the source of truth, R6) and extends the write-after-each-success
+  discipline below row granularity. Additive status value: the v1 mirror-file contract gains
+  `resolving`; an unknown status remains a typed `IssuesFileError`.
+- **Alternatives considered**: close-then-comment reordering (rejected: a comment failing after
+  the close leaves an issue closed with NO audit trail — the closure would be exactly the
+  silent mutation OQ-B's audit comment exists to prevent); re-reading the issue's comments for
+  the marker before re-commenting (rejected: a network read at recovery time, and the marker is
+  forensics — the sidecar is the dedup source of truth, R6).
+- **Residual seam, noted deliberately**: every emit-then-record pair (create, update, the one
+  dismissal comment) still has an irreducible window where the tracker effect succeeded and the
+  local sidecar write then fails — tracker and disk cannot commit atomically, and recording
+  BEFORE the transport call would fabricate state (a note recorded that never posted). The
+  dismissal path needs no `resolving`-style split (it has ONE transport mutation, so there is
+  no inter-mutation boundary to persist). Mitigation: the sidecar write failure is surfaced as
+  the emitter's own typed `EmissionError` (exit 1, actionable, never a traceback), and each
+  path's recovery is at worst one duplicate of a single idempotent-content effect.
