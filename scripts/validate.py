@@ -125,8 +125,21 @@ def scan_adrs(repo_root: Path, adr_dir: str, namespace: str = "") -> list[Adr]:
     if not d.is_dir():
         return out
     for p in sorted(d.rglob("*.md")):
-        text = p.read_text(encoding="utf-8", errors="replace")
-        fm, body = split_front_matter(text)
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            # Fail-safe (FR-008): an unreadable ADR must not abort index construction —
+            # that would crash validation (and the lifecycle hooks) BEFORE the freshness
+            # check's own unreadable/indeterminate handling ever ran. Index it from its
+            # filename so citations still RESOLVE; content-dependent checks skip it
+            # (status 'unknown' is neither accepted nor superseded), and a pinned
+            # citation to it degrades to the indeterminate note when hashing fails.
+            text = None
+        if text is None:
+            fm, body, status = {}, "", "unknown"
+        else:
+            fm, body = split_front_matter(text)
+            status = parse_status(fm, body)
         adr_id = str(fm.get("id") or "").strip()
         if not adr_id:
             m = ADR_ID_IN.search(p.stem)        # prefer a fully-qualified id in the filename
@@ -140,7 +153,7 @@ def scan_adrs(repo_root: Path, adr_dir: str, namespace: str = "") -> list[Adr]:
         adr_id = qualify(adr_id, namespace)
         ns = adr_id.split("-ADR-")[0] if "-ADR-" in adr_id else ""
         out.append(Adr(
-            id=adr_id, namespace=ns, status=parse_status(fm, body),
+            id=adr_id, namespace=ns, status=status,
             relpath=str(p.relative_to(repo_root)), repo_root=repo_root,
             body_top=body_above_amendments(body),
         ))
@@ -167,9 +180,12 @@ def scan_citations(repo_root: Path, specs_dir: str, keys: CitationKeys, namespac
     return cits
 
 
-def _spec_ids(root: Path, specs_dir: str) -> set[str]:
+def _spec_ids(root: Path, specs_dir: str) -> dict[str, Path]:
+    """Feature id → its spec.md path, indexed RECURSIVELY (a nested specs/group/NNN-x/
+    layout counts). The PATH is retained so freshness/repin resolve through this same
+    index instead of reconstructing a flat layout that a nested feature would fail."""
     d = root / specs_dir
-    return {p.parent.name for p in d.rglob("spec.md")} if d.is_dir() else set()
+    return {p.parent.name: p for p in sorted(d.rglob("spec.md"))} if d.is_dir() else {}
 
 
 def load_config(path) -> tuple[GovernanceConfig, Path]:
@@ -191,7 +207,7 @@ def _source_root(repo_root: Path, src) -> Path:
 def build_indexes(cfg: GovernanceConfig, repo_root: Path):
     this_adrs = scan_adrs(repo_root, cfg.adr_dir, cfg.namespace)
     adr_index = {a.id: a for a in this_adrs}
-    spec_index: dict[str, set[str]] = {"": _spec_ids(repo_root, cfg.specs_dir)}
+    spec_index: dict[str, dict[str, Path]] = {"": _spec_ids(repo_root, cfg.specs_dir)}
     for src in cfg.sources:
         sroot = _source_root(repo_root, src)
         # the peer's own layout, via the single shared peek (pins.peer_layout, R1)
@@ -204,9 +220,11 @@ def build_indexes(cfg: GovernanceConfig, repo_root: Path):
     return this_adrs, adr_index, spec_index
 
 
-def _resolve_spec(value: str, spec_index: dict[str, set[str]]) -> bool:
+def _resolve_spec(value: str, spec_index) -> bool:
+    """Membership over the spec index (source id → feature ids; values may be the
+    id→path mapping build_indexes produces or a plain id set — `in` works on both)."""
     sid, spec = value.split(":", 1) if ":" in value else ("", value)
-    return spec.strip() in spec_index.get(sid.strip(), set())
+    return spec.strip() in spec_index.get(sid.strip(), ())
 
 
 # ──────────────────────────── checks ────────────────────────────
@@ -322,7 +340,7 @@ def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_inde
                              f"{c.relation} {c.raw!r} is unpinned — run `repin --apply` to start "
                              f"freshness tracking", c.source, severity="note"))
             continue
-        t = P.resolve_target(cfg, repo_root, c.relation, c.value, adr_index)
+        t = P.resolve_target(cfg, repo_root, c.relation, c.value, adr_index, spec_index)
         if t.status != "ok":
             out.append(Issue("citations_fresh",
                              f"{c.relation} {c.raw!r}: freshness indeterminate — {t.reason}",

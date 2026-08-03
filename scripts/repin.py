@@ -126,7 +126,8 @@ def repin_plan(cfg, repo_root: Path, selector: Optional[str] = None,
                 plan.keep.append(pin)   # outside the selector — carried verbatim (US2-3)
             continue
         resolves = (c.value in adr_index) if c.relation == "cites" else V._resolve_spec(c.value, spec_index)
-        t = P.resolve_target(cfg, repo_root, c.relation, c.value, adr_index) if resolves else None
+        t = (P.resolve_target(cfg, repo_root, c.relation, c.value, adr_index, spec_index)
+             if resolves else None)
         if t is None or t.status != "ok":
             reason = t.reason if t is not None else "the citation fails citations_resolve"
             plan.entries.append(PlanEntry("skip", *k, detail=f"not pinned — {reason}"))

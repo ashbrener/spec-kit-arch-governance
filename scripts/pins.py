@@ -40,6 +40,8 @@ PinKey = tuple[str, str, str]
 # stale failure (which can halt a blocking repo). Malformed routes to the fail-safe
 # indeterminate-note path instead (FR-008).
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_RELATIONS = ("derived_from", "cites")
 
 
 def _posix(s) -> str:
@@ -80,6 +82,28 @@ class PinLoadError(Exception):
     """The pin file exists but cannot be parsed into pins (absent ≠ present-but-broken)."""
 
 
+def _validate_record(p: Pin) -> None:
+    """Every field of a pin record is REQUIRED with a valid shape (FR-003). A record with
+    a valid digest but a missing/empty companion field must NOT be accepted with defaults:
+    validation would report it fresh and repin would treat it up-to-date — the damage
+    would never surface and never be repaired. Any violation is the malformed-file path."""
+    if not p.citing:
+        raise PinLoadError("a pin record has an empty 'citing' path")
+    if p.relation not in _RELATIONS:
+        raise PinLoadError(f"pin for {p.value!r} has an invalid relation {p.relation!r} "
+                           f"(want one of {', '.join(_RELATIONS)})")
+    if not p.value:
+        raise PinLoadError(f"a pin record ({p.citing}) has an empty citation 'value'")
+    if not p.path:
+        raise PinLoadError(f"pin for {p.value!r} is missing its resolved 'path'")
+    if not _DIGEST_RE.match(p.digest):
+        raise PinLoadError(f"pin for {p.value!r} has an invalid digest {p.digest!r} "
+                           f"(want sha256:<64 hex>)")
+    if not _DATE_RE.match(p.pinned):
+        raise PinLoadError(f"pin for {p.value!r} has a missing/invalid 'pinned' date "
+                           f"{p.pinned!r} (want YYYY-MM-DD)")
+
+
 def digest_path(p: Path) -> str:
     """FR-004/D2: SHA-256 over the artifact bytes with CRLF→LF normalization ONLY —
     a CRLF checkout of unchanged content is not 'stale'; any other change is visible."""
@@ -116,9 +140,7 @@ def load_pins(repo_root) -> dict[PinKey, Pin]:
             for e in data["pins"]
         ]
         for p in pins:
-            if not _DIGEST_RE.match(p.digest):
-                raise PinLoadError(f"pin for {p.value!r} has an invalid digest "
-                                   f"{p.digest!r} (want sha256:<64 hex>)")
+            _validate_record(p)
     except PinLoadError:
         raise
     except Exception as exc:
@@ -172,13 +194,17 @@ def _display(repo_root: Path, p: Path) -> str:
     return os.path.relpath(p, repo_root)
 
 
-def resolve_target(cfg: GovernanceConfig, repo_root, relation: str, value: str, adr_index) -> Target:
+def resolve_target(cfg: GovernanceConfig, repo_root, relation: str, value: str,
+                   adr_index, spec_index) -> Target:
     """Resolve a citation to the file its pin watermarks (D3) and hash it (D2).
 
-    Uses the existing resolution machinery only — `adr_index` for `cites`, the config's
-    `sources[].locator` (+ the peer's own layout) for `derived_from`. Deterministic and
-    offline: 'current state' means the peer as present on this machine. Fail-safe: every
-    non-ok outcome carries a reason; nothing raises.
+    Uses the SAME indexes resolution uses — `adr_index` for `cites`, `spec_index`
+    (source id → {feature id → spec.md path}, built RECURSIVELY by build_indexes) for
+    `derived_from`. The path is retained from the index, never reconstructed as a flat
+    `<specs_dir>/<id>/spec.md`: a nested feature (`specs/group/NNN-x/`) that
+    citations_resolve accepts must be equally pinnable and fresh — not indeterminate.
+    Deterministic and offline: 'current state' means the peer as present on this
+    machine. Fail-safe: every non-ok outcome carries a reason; nothing raises.
     """
     repo_root = Path(repo_root)
     if relation == "cites":
@@ -189,22 +215,17 @@ def resolve_target(cfg: GovernanceConfig, repo_root, relation: str, value: str, 
     else:
         sid, spec = value.split(":", 1) if ":" in value else ("", value)
         sid, spec = sid.strip(), spec.strip()
-        if sid:
-            src = next((s for s in cfg.sources if s.id == sid), None)
-            if src is None:
-                return Target("unresolved",
-                              reason=f"source {sid!r} is not listed in this repo's sources")
-            sroot = (repo_root / src.locator).resolve()
-            if not sroot.is_dir():
-                return Target("unresolved",
-                              reason=f"source {sid!r} ({src.locator!r}) is not reachable")
-            _, specs_dir, _ = peer_layout(sroot, cfg)
-        else:
-            sroot, specs_dir = repo_root, cfg.specs_dir
-        p = sroot / specs_dir / spec / "spec.md"
-        if not p.is_file():
+        feats = (spec_index or {}).get(sid)
+        if feats is None:
             return Target("unresolved",
-                          reason=f"derived_from {value!r}: no spec.md at {_display(repo_root, p)}")
+                          reason=f"source {sid!r} is not listed in this repo's sources")
+        p = feats.get(spec)
+        if p is None:
+            where = f"source {sid!r}" if sid else "this repo"
+            return Target("unresolved",
+                          reason=f"derived_from {value!r}: no such feature under {where} "
+                                 f"(missing, or the source is unreachable)")
+        p = Path(p)
     try:
         return Target("ok", _display(repo_root, p), digest_path(p))
     except OSError as exc:

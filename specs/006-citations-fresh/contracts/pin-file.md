@@ -18,8 +18,12 @@ maintainers*, not as an interop promise.
   unpinned for that run (FR-008). `repin` warns and rebuilds it on `--apply` (full set only —
   a selector over a malformed file is refused, research R12). "Malformed" includes: unparseable
   YAML, wrong shape, an empty/None-parsing document (truncation, merge mishap — the writer never
-  emits one), and any pin digest not matching `sha256:<64 lowercase hex>` (a garbage digest must
-  never become a comparable pin that fakes a determinate stale failure).
+  emits one), any pin digest not matching `sha256:<64 lowercase hex>` (a garbage digest must
+  never become a comparable pin that fakes a determinate stale failure), and any record with a
+  missing/empty required field or invalid shape — `citing`, `relation` (∈ derived_from|cites),
+  `value`, `path`, `pinned` (YYYY-MM-DD) are ALL required: a record accepted with defaulted
+  fields would read as fresh/up-to-date forever and the damage would never surface or be
+  repaired.
 
 ## Shape
 

@@ -6,8 +6,11 @@ citations_resolve failure owns its citation's story (FR-009); the check never wr
 pins (FR-011/SC-004). Two-member tmp-path domains, neutral names throughout.
 """
 
+import os
 import sys
 from pathlib import Path
+
+import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -203,6 +206,34 @@ def test_adr_amendment_registers_as_movement(tmp_path):
     assert fails[0].check == "citations_fresh"
 
 
+def test_nested_feature_dir_is_resolvable_pinnable_and_fresh(tmp_path):
+    """_spec_ids indexes features RECURSIVELY (specs/group/NNN-x counts), so freshness
+    and repin must resolve through the SAME index — a nested feature that
+    citations_resolve accepts round-trips: resolvable, pinnable, fresh, and its
+    movement is still detected. Never indeterminate/unpinnable."""
+    src, build = _domain(tmp_path)
+    nested = src / "specs" / "group"
+    nested.mkdir()
+    (src / "specs" / "005-fund-model").rename(nested / "005-fund-model")   # nest the feature
+    _pin(build)                                        # repin can pin it (not a skip)
+    pins = P.load_pins(build)
+    k = ("specs/001-derived/spec.md", "derived_from", "docs:005-fund-model")
+    assert k in pins
+    assert "group/005-fund-model" in pins[k].path      # the INDEXED path, not a flat guess
+    _, _, issues = _validate(build)
+    assert _fresh(issues) == []                        # fresh — no indeterminate note
+    assert not [i for i in issues if i.check == "citations_resolve" and i.severity == "fail"]
+    # movement at the nested path is still detected as a determinate staleness finding
+    (nested / "005-fund-model" / "spec.md").write_text("moved upstream\n")
+    _, _, issues = _validate(build)
+    fails = _fresh_fails(issues)
+    assert len(fails) == 1 and "docs:005-fund-model" in fails[0].detail
+    # and repin clears it through the same index
+    _pin(build)
+    _, _, issues = _validate(build)
+    assert _fresh(issues) == []
+
+
 def test_disabled_check_suppresses_findings_and_nudges(tmp_path):
     src, build = _domain(tmp_path)
     _pin(build)
@@ -290,6 +321,48 @@ def test_malformed_digests_route_to_the_malformed_file_path_never_stale(tmp_path
         assert G.gate_decision(blocking, root).decision == "proceed", name
 
 
+def test_incomplete_pin_records_route_to_malformed_never_fresh(tmp_path):
+    """A record with a VALID digest but a missing/empty companion field (pinned, path)
+    or a bogus relation must not be accepted with defaults — validation could report it
+    fresh and repin would treat it up-to-date, never repairing the record. Every field
+    is required with a valid shape; violations are the malformed-file path."""
+    good_digest = "sha256:" + "a" * 64
+    record = ("version: v1\npins:\n"
+              "- citing: specs/001-derived/spec.md\n"
+              "  relation: {relation}\n"
+              "  value: docs:005-fund-model\n"
+              "{path_line}"
+              "  digest: " + good_digest + "\n"
+              "{pinned_line}")
+    cases = {
+        "missing-pinned": {"relation": "derived_from",
+                           "path_line": "  path: ../docs/specs/005-fund-model/spec.md\n",
+                           "pinned_line": ""},
+        "missing-path": {"relation": "derived_from", "path_line": "",
+                         "pinned_line": "  pinned: '2026-08-03'\n"},
+        "bogus-relation": {"relation": "implements",
+                           "path_line": "  path: ../docs/specs/005-fund-model/spec.md\n",
+                           "pinned_line": "  pinned: '2026-08-03'\n"},
+    }
+    for name, parts in cases.items():
+        _, build = _domain(tmp_path / name)
+        (build / P.PIN_FILE).write_text(record.format(**parts))
+        try:
+            P.load_pins(build)
+            assert False, f"{name}: an incomplete record must raise PinLoadError"
+        except P.PinLoadError:
+            pass
+        cfg, root, issues = _validate(build)
+        notes = _fresh(issues)
+        malformed = [i for i in notes if P.PIN_FILE in i.detail]
+        assert len(malformed) == 1 and malformed[0].severity == "note", name
+        assert sum("is unpinned" in i.detail for i in notes) == 2, name   # never 'fresh'
+        assert _fresh_fails(issues) == [], name
+        # and repin does NOT treat the damaged record as up-to-date — it plans the rebuild
+        plan = R.repin_plan(cfg, root)
+        assert plan.rebuild and not [e for e in plan.entries if e.action == "up-to-date"], name
+
+
 # ── US4: enforcement + fail-safe ──
 
 def test_blocking_gate_halts_on_determinate_stale_and_clears_after_repin(tmp_path):
@@ -341,6 +414,39 @@ def test_unreadable_cited_artifact_is_indeterminate(tmp_path, monkeypatch):
     assert len(indet) == 2 and all(i.severity == "note" for i in indet)
     assert all("cannot read" in i.detail for i in indet)     # says what could not be evaluated, why
     assert _fresh_fails(issues) == []
+
+
+def test_permission_denied_adr_yields_indeterminate_note_not_a_crash(tmp_path):
+    """A cited ADR that EXISTS but cannot be read (chmod 000) must not abort validation
+    while scan_adrs builds the ADR index — that crash fired BEFORE the freshness check's
+    unreadable handling ever ran. The ADR is indexed from its filename (so the citation
+    still resolves — no false resolve failure), and the pinned citation degrades to the
+    promised indeterminate note. The blocking gate proceeds (indeterminate never halts)."""
+    src, build = _domain(tmp_path)
+    _pin(build)
+    adr = src / "docs" / "adr" / "CORE-ADR-001-ruling.md"
+    adr.chmod(0)
+    try:
+        try:
+            adr.read_text()
+            pytest.skip("platform ignores chmod 000 (e.g. running as root)")
+        except PermissionError:
+            pass
+        cfg, root = V.load_config(build)
+        issues, _ = V.validate(cfg, root)          # must complete, not raise
+        indet = [i for i in _fresh(issues)
+                 if "indeterminate" in i.detail and "CORE-ADR-001" in i.detail]
+        assert len(indet) == 1 and indet[0].severity == "note"
+        assert "cannot read" in indet[0].detail
+        assert _fresh_fails(issues) == []
+        # indexed from its filename: the citation still RESOLVES (no false failure)
+        assert not [i for i in issues if i.check == "citations_resolve" and i.severity == "fail"]
+        # and the lifecycle surface survives too: blocking gate completes and proceeds
+        blocking = cfg.model_copy(update={"mode": "blocking"})
+        assert G.gate_decision(blocking, root).decision == "proceed"
+    finally:
+        adr.chmod(0o644)
+    assert os.access(adr, os.R_OK)                 # fixture restored for cleanup
 
 
 def test_resolve_failure_is_never_double_reported(tmp_path):
