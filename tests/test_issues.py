@@ -745,6 +745,86 @@ def test_resolution_detail_distinguishes_repin_revert_and_removal(tmp_path):
     assert ISS._resolution_detail(rec, None) == "no longer stale"
 
 
+# ═══ Phase 6 — US4: the emitter can fail without touching enforcement (T015/T016) ═══
+
+def test_transport_failing_on_every_call_exits_1_records_nothing(tmp_path, capsys):
+    _, build, cfg, root, facts = _stale_pair(tmp_path)
+    t = FakeTransport()
+    t.fail["create"] = ISS.EmissionError("credential missing: run `gh auth login`")
+    assert ISS.main([str(build), "--apply"], transport=t) == 1
+    err = capsys.readouterr().err
+    assert "credential missing" in err                     # the failure named
+    assert not (build / ISS.MIRROR_FILE).exists()          # zero mirrors for failed rows
+
+
+def test_enforcement_is_byte_identical_with_emitter_enabled_vs_absent(tmp_path, capsys):
+    import gate as G
+    src, build = _domain(tmp_path)
+    _pin(build)
+    _go_stale(src)                                         # a real staleness fact exists
+    config_before = (build / ".spec-arch-governance.yml").read_text()
+
+    def enforcement_run():
+        capsys.readouterr()
+        v_exit = V.main([str(build)])
+        v_out = capsys.readouterr()
+        g_exit = G.main([str(build)])
+        g_out = capsys.readouterr()
+        return v_exit, v_out.out, v_out.err, g_exit, g_out.out, g_out.err
+
+    baseline = enforcement_run()
+    _enable(build)                                         # opt in — enforcement untouched
+    assert enforcement_run() == baseline                   # SC-001/SC-004
+    # ...and a FAILING emitter run in between changes nothing either
+    t = FakeTransport()
+    t.fail["create"] = ISS.EmissionError("tracker unreachable")
+    assert ISS.main([str(build), "--apply"], transport=t) == 1
+    capsys.readouterr()
+    assert enforcement_run() == baseline
+    (build / ".spec-arch-governance.yml").write_text(config_before)
+    assert enforcement_run() == baseline
+
+
+def test_extension_manifest_registers_no_hook_for_issues():
+    manifest = yaml.safe_load((SCRIPTS.parent / "extension.yml").read_text(encoding="utf-8"))
+    hooked = {spec["command"] for spec in manifest["hooks"].values()}
+    assert hooked == {"speckit.arch-governance.validate", "speckit.arch-governance.gate"}
+    assert not any("issues" in c for c in hooked)          # never in any lifecycle hook
+
+
+def test_not_enabled_dry_run_performs_zero_filesystem_writes(tmp_path, capsys):
+    src, build = _domain(tmp_path)
+    _pin(build)
+    _go_stale(src)                                         # facts exist, but no opt-in
+    before_build, before_src = _tree_bytes(build), _tree_bytes(src)
+    assert ISS.main([str(build)]) == 0
+    assert "not enabled" in capsys.readouterr().out
+    assert _tree_bytes(build) == before_build and _tree_bytes(src) == before_src
+
+
+def test_validate_and_gate_never_construct_a_transport(tmp_path, monkeypatch):
+    """Enforcement and mirroring share FACTS, never a code path (FR-010): validate
+    and gate complete with the transport seam poisoned and subprocess guarded
+    against any `gh` invocation."""
+    import gate as G
+    src, build = _domain(tmp_path)
+    _pin(build)
+    _go_stale(src)
+    _enable(build)
+    monkeypatch.setattr(ISS, "GhTransport", None)          # constructing it would crash
+    real_run = ISS.subprocess.run
+
+    def no_gh(argv, *a, **k):
+        assert "gh" not in str(argv[0]), "enforcement path invoked the gh transport!"
+        return real_run(argv, *a, **k)
+
+    monkeypatch.setattr(V.subprocess, "run", no_gh)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    assert ISS.staleness_facts(issues)                     # facts flow...
+    assert not G.gate_decision(cfg, root).blocks           # ...and the gate still decides
+
+
 # ═══ Phase 3 — US1: GhTransport asserted on command construction ONLY (T009) ═══
 
 def test_gh_transport_builds_gh_api_commands():

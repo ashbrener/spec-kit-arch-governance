@@ -52,8 +52,8 @@ of `.spec-arch-issues.yml`. Enforcement (gate, flip guard) needs zero changes.
 
 ## Phase 6: US4 — failure isolation from enforcement (P4)
 
-- [ ] T015 [US4] Write failing tests: transport failing on every call → `--apply` exits 1 naming the failure, zero mirror records written for failed rows; validate + gate on the same domain produce byte-identical reports and exit codes with emitter enabled vs config absent (SC-004/SC-001); no hook registration for issues in `extension.yml` (parse and assert the hooks section names only validate/gate); with config absent, `scripts/issues.py` dry-run exits 0 with the not-enabled line and performs zero filesystem writes.
-- [ ] T016 [US4] Close any gaps T015 exposes (error propagation, partial-write ordering, no-op purity). Make T015 pass.
+- [X] T015 [US4] Write failing tests: transport failing on every call → `--apply` exits 1 naming the failure, zero mirror records written for failed rows; validate + gate on the same domain produce byte-identical reports and exit codes with emitter enabled vs config absent (SC-004/SC-001); no hook registration for issues in `extension.yml` (parse and assert the hooks section names only validate/gate); with config absent, `scripts/issues.py` dry-run exits 0 with the not-enabled line and performs zero filesystem writes.
+- [X] T016 [US4] Close any gaps T015 exposes (error propagation, partial-write ordering, no-op purity). Make T015 pass.
 
 ## Phase 7: Polish & surfaces
 
