@@ -158,6 +158,13 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   that opens `---` but never validly terminates the block — a lost or damaged closing
   delimiter — is a parse failure too, not "no block". Only a file with no opening delimiter at
   all is honestly absent; a mid-document `---` horizontal rule never triggers the signal.
+  Round 11 P2 fixed that tightening's FALSE-POSITIVE twin (the harvest/vacuity see-saw: every
+  tightening for a false negative must be re-checked against the valid-input floor): canonical
+  EMPTY front matter — an immediate closing delimiter, `---\n---\n…`, including the
+  whitespace-only-body and CRLF variants the existing block regex already tolerates — is VALID
+  zero-citation front matter, honestly absent and evaluation-unimpaired, never malformed. A
+  single misclassified sibling file would have made `freshness_evaluated` false GLOBALLY,
+  preserving every mirror indefinitely and suppressing legitimate resolutions.
 - **Rationale**: "no facts" has two meanings — CONFIRMED resolution vs NOT EVALUATED — and only
   the first may close a live issue. Without the signal, disabling the check (or a malformed pin
   file collapsing every pin to unpinned) made the planner resolve every open mirror — often

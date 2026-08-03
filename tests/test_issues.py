@@ -1800,6 +1800,43 @@ def test_horizontal_rule_without_front_matter_stays_absent(tmp_path):
     assert ISS.freshness_evaluated(cfg, issues, extras)   # never over-triggers
 
 
+# ═══ Review round 11 — P2: canonical EMPTY front matter is valid, never malformed ═══
+# The R5/R6 harvest see-saw's false-positive twin: `---\n---\n# Spec` is valid empty
+# YAML front matter (zero citations, honestly absent) — flagging it made
+# freshness_evaluated false GLOBALLY, preserving every mirror indefinitely and
+# suppressing legitimate resolutions.
+
+def test_canonical_empty_front_matter_is_not_malformed():
+    assert V.front_matter_malformed("---\n---\n# Spec\n") is False       # zero-body block
+    assert V.front_matter_malformed("---\n\n---\n# Spec\n") is False     # whitespace-only body
+    assert V.front_matter_malformed("---\n   \n---\n# Spec\n") is False  # spaces-only body
+    # CRLF empty variant: the existing _FM_RE already tolerates CRLF for NON-empty
+    # blocks (its \s* consumes \r), so the empty check matches that floor — no
+    # broader CRLF support invented here
+    assert bool(V._FM_RE.match("---\r\na: b\r\n---\r\n# S\n")) is True   # the existing floor
+    assert V.front_matter_malformed("---\r\n---\r\n# Spec\r\n") is False
+    # regression guards: the R6 cases stay malformed
+    assert V.front_matter_malformed("---\nderived_from: []\n# closer lost\n") is True
+    assert V.front_matter_malformed("---\nderived_from: []\n--\n# Spec\n") is True
+
+
+def test_empty_front_matter_sibling_never_suppresses_resolution(tmp_path):
+    src, build, k = _mirrored_stale(tmp_path)          # open mirror #101, still stale
+    (build / "specs" / "002-empty").mkdir(parents=True)
+    (build / "specs" / "002-empty" / "spec.md").write_text("---\n---\n# Empty FM spec\n")
+    assert R.main([str(build), "--apply"]) == 0        # the fact legitimately resolves
+    cfg, root, issues, extras = _validated_with_extras(build)
+    assert extras.malformed_sources == []              # empty FM: honestly absent
+    assert ISS.freshness_evaluated(cfg, issues, extras)   # evaluation UNIMPAIRED
+    t = FakeTransport()
+    t.states[101] = "open"
+    rows, report, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t)
+    by_key = {r.key: r for r in rows}
+    assert by_key[k].disposition == "resolve"          # the resolution PROCEEDS
+    assert len(t.of("close")) == 1
+    assert _mirrors(build)[k].status == "resolved"     # never indefinitely preserved
+
+
 # ═══ Review round 6 — P2: the SEARCH token is fixed-length, identity-independent ═══
 
 def test_search_token_is_fixed_length_and_stable():

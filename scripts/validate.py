@@ -123,6 +123,17 @@ def split_front_matter(text: str):
 # determinately evaluated.
 _FM_OPEN_RE = re.compile(r"^---\s*\n")
 
+# Canonical EMPTY front matter (round 11 P2): an immediate closing delimiter —
+# `---\n---\n…` — is VALID zero-body front matter, not an unterminated block. It
+# yields no citations (honestly absent, evaluation unimpaired). _FM_RE cannot match
+# a zero-body block (it requires a body line), so without this short-circuit the
+# round-6 opened-but-unterminated detector false-positived on it — the harvest
+# see-saw's false-positive twin: every tightening for a false negative must be
+# re-checked against the valid-input floor. `\s*` mirrors _FM_RE's own delimiter
+# tolerance (which already admits CRLF for non-empty blocks) — the same floor, no
+# broader line-ending support invented here.
+_FM_EMPTY_RE = re.compile(r"^---\s*\n---\s*(?:\n|$)")
+
 
 def front_matter_malformed(text: str) -> bool:
     """A front-matter block was OPENED but does not parse to a mapping (slice 007
@@ -136,6 +147,8 @@ def front_matter_malformed(text: str) -> bool:
     check's existing findings."""
     if not _FM_OPEN_RE.match(text):
         return False
+    if _FM_EMPTY_RE.match(text):
+        return False            # canonical EMPTY front matter — valid, zero citations
     m = _FM_RE.match(text)
     if not m:
         return True             # opened, never (validly) terminated
