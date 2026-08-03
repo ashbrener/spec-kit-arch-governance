@@ -94,3 +94,19 @@ operation performed would not be the operation requested — while (b) fails fas
 actionable path and keeps the selector's "others untouched" guarantee unconditionally true
 whenever a selector run succeeds. A full (unselected) rebuild remains apply-worthy even when the
 rebuilt pin list is empty — an empty-but-valid pin file IS the rebuild.
+
+## R13 — Unreadable frontmatter-only-id ADRs: recover the identity from the pin (review round 6)
+`scan_adrs` guards unreadable ADRs by indexing them from their FILENAME (R-round-4) — but an ADR
+whose id exists only in front matter (`decision.md`) has no filename identity, gets skipped, and
+a pinned citation to it then fails `citations_resolve`: a *determinate*, gate-halting failure for
+what is really a cannot-evaluate state. The recovery source is the pin file itself — a recorded,
+operator-written, git-tracked id→path association (`value` + `path`, FR-003). When a pinned
+`cites` value is absent from the index AND its recorded path still exists but is unreadable,
+`build_indexes` re-indexes it from the pin with status `unknown` (content-dependent checks skip
+it), so the citation resolves and freshness owns the story with its indeterminate note.
+Contract-honest boundaries, deliberately narrow: a recorded path that is GONE stays a resolve
+failure (the target really is missing — freshness stays silent per FR-009); a READABLE file that
+`scan_adrs` did not recognize is never invented into an ADR (the pin must not launder
+non-existence); a malformed pin file contributes no recovery (its single note already owns that
+story); and with `checks: citations_fresh: false` the pin file is "simply ignored" (spec edge
+case) — no recovery either, restoring the pre-006 contract exactly.

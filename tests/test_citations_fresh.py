@@ -518,6 +518,49 @@ def test_permission_denied_adr_yields_indeterminate_note_not_a_crash(tmp_path):
     assert os.access(adr, os.R_OK)                 # fixture restored for cleanup
 
 
+def test_frontmatter_only_id_adr_unreadable_recovers_identity_from_the_pin(tmp_path):
+    """R13: an ADR whose id lives ONLY in front matter (file named decision-record.md)
+    has no filename identity when unreadable, so the round-4 filename guard cannot index
+    it — a pinned citation to it would fail citations_resolve and could HALT a blocking
+    gate. The pin file's recorded id→path association recovers the index entry: the
+    citation still resolves, freshness reports the single indeterminate note, and the
+    blocking gate proceeds. Boundaries: a DELETED target stays a resolve failure."""
+    src, build = _domain(tmp_path)
+    adr_dir = src / "docs" / "adr"
+    adr = adr_dir / "decision-record.md"           # no ADR id anywhere in the filename
+    (adr_dir / "CORE-ADR-001-ruling.md").rename(adr)
+    _pin(build)                                    # records value CORE-ADR-001 → its path
+    pins = P.load_pins(build)
+    k = ("specs/001-derived/plan.md", "cites", "CORE-ADR-001")
+    assert "decision-record.md" in pins[k].path    # the recorded association we recover from
+    adr.chmod(0)
+    try:
+        try:
+            adr.read_text()
+            pytest.skip("platform ignores chmod 000 (e.g. running as root)")
+        except PermissionError:
+            pass
+        cfg, root = V.load_config(build)
+        issues, _ = V.validate(cfg, root)          # must complete, not raise
+        # recovered from the pin: NO citations_resolve failure (which would gate-halt)
+        assert not [i for i in issues if i.check == "citations_resolve" and i.severity == "fail"]
+        indet = [i for i in _fresh(issues)
+                 if "indeterminate" in i.detail and "CORE-ADR-001" in i.detail]
+        assert len(indet) == 1 and indet[0].severity == "note"
+        assert "cannot read" in indet[0].detail
+        assert _fresh_fails(issues) == []
+        blocking = cfg.model_copy(update={"mode": "blocking"})
+        assert G.gate_decision(blocking, root).decision == "proceed"
+    finally:
+        adr.chmod(0o644)
+    # boundary: a recorded path that is GONE is not recovered — resolve owns it (FR-009)
+    adr.unlink()
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    assert any(i.check == "citations_resolve" and i.severity == "fail" for i in issues)
+    assert not [i for i in _fresh(issues) if "CORE-ADR-001" in i.detail and i.severity == "fail"]
+
+
 def test_resolve_failure_is_never_double_reported(tmp_path):
     _, build = _domain(tmp_path)
     (build / "specs" / "001-derived" / "spec.md").write_text(

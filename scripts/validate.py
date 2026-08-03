@@ -204,6 +204,42 @@ def _source_root(repo_root: Path, src) -> Path:
     return (repo_root / src.locator).resolve()
 
 
+def _recover_unreadable_pinned_adrs(cfg: GovernanceConfig, repo_root: Path, adr_index) -> None:
+    """Fail-safe recovery (research R13): an ADR whose id exists ONLY in front matter
+    cannot be identified from its filename when the file is unreadable, so scan_adrs
+    skips it — and a PINNED citation to it would fail citations_resolve, a determinate
+    failure (gate-halting in blocking) for what is really a cannot-evaluate state.
+
+    The pin file is a recorded, operator-written, git-tracked id→path association.
+    When a pinned `cites` value is missing from the index AND its recorded path still
+    EXISTS but is UNREADABLE, re-index it from the pin (status 'unknown': content
+    checks skip it) so the citation resolves and freshness owns the story with its
+    indeterminate note. Contract-honest boundaries: a recorded path that is GONE stays
+    a resolve failure (FR-009 — the target really is missing), and a READABLE file that
+    scan_adrs did not recognize is never invented into an ADR."""
+    try:
+        pins = P.load_pins(repo_root)
+    except P.PinLoadError:
+        return   # a malformed pin file already owns its story (the single note)
+    for pin in pins.values():
+        if pin.relation != "cites" or not pin.path:
+            continue
+        vid = qualify(pin.value, cfg.namespace)
+        if vid in adr_index:
+            continue
+        p = repo_root / pin.path
+        if not p.is_file():
+            continue          # target truly gone — a resolve failure is the honest verdict
+        try:
+            p.read_bytes()
+            continue          # readable yet unindexed — not an ADR; do not invent one
+        except OSError:
+            pass              # exists but unreadable: the cannot-evaluate state
+        ns = vid.split("-ADR-")[0] if "-ADR-" in vid else ""
+        adr_index[vid] = Adr(id=vid, namespace=ns, status="unknown",
+                             relpath=pin.path, repo_root=repo_root, body_top="")
+
+
 def build_indexes(cfg: GovernanceConfig, repo_root: Path):
     this_adrs = scan_adrs(repo_root, cfg.adr_dir, cfg.namespace)
     adr_index = {a.id: a for a in this_adrs}
@@ -217,6 +253,9 @@ def build_indexes(cfg: GovernanceConfig, repo_root: Path):
         for a in scan_adrs(sroot, s_adr_dir, s_namespace):
             adr_index.setdefault(a.id, a)
         spec_index[src.id] = _spec_ids(sroot, s_specs_dir)
+    # disabled check ⇒ the pin file is "simply ignored" (spec edge case) — no recovery either
+    if cfg.checks.citations_fresh:
+        _recover_unreadable_pinned_adrs(cfg, repo_root, adr_index)
     return this_adrs, adr_index, spec_index
 
 
