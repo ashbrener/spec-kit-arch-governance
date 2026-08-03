@@ -48,8 +48,14 @@ One entry per mirrored fact. File: `version: v1`, records sorted by pin key (det
 
 - ∅ → `creating` — the R10 create-INTENT, persisted BEFORE the remote create (no issue
   number; an intent-write failure is a clean abort). `creating` → `open` — the create
-  succeeded and its number was recorded, or a retry ADOPTED the issue found by marker.
-  `creating` → ∅ — retry probe found nothing and the fact is gone: intent cleared.
+  succeeded and its number was recorded, or a retry ADOPTED the issue found by marker
+  (round 9 P2-2: on a NOT-evaluated run the adoption stops here — no resolution/dismissal
+  claim; the next determinate apply classifies through the normal open-mirror machinery).
+  `creating` → `open` → `resolving` → `resolved` — fact determinately absent and the adopted
+  issue open: the full resolution completes in the SAME apply (round 9 P2-1, via the shared
+  R9 two-step). `creating` → `open` → `resolved` — fact determinately absent, adopted issue
+  already closed: record-only. `creating` → ∅ — retry probe found nothing (or the issue was
+  deleted again) and the fact is gone: intent cleared.
 - `open` → `open` — apply performed **update** (content state moved; digests refreshed).
 - `open` → `resolved` — apply performed **resolve** (close + audit comment), or found the issue
   already human-closed while the fact is resolved (record-only, no comment).

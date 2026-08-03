@@ -295,6 +295,22 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   `record.token`), so a call site cannot pick the wrong source; fresh paths persist the intent
   record first and render from it, making posted bytes equal checked bytes by construction.
   The namespace prose in the marker stays cosmetic forensics — only the token is matched.
+- **Round 9 — the fact-absent creating-recovery matrix, finalized**: (P2-1) adopt-then-wait
+  left an obsolete issue open after a "successful" recovery run; an adoption whose fact is
+  DETERMINATELY absent now completes the full resolution in the SAME apply — found open → the
+  R9 two-step via the shared `close_with_audit` machinery (persist `resolving` with the stored
+  token, audit comment from the persisted record, close, `resolved`), found closed →
+  record-only `resolved`; a failure mid-sequence still leaves the resumable intent states.
+  (P2-2) when the run is NOT determinately evaluated, a found-closed adoption carries ZERO
+  evidence the fact resolved — recording `resolved` would let a still-stale fact spawn a
+  duplicate lifecycle once evaluation resumed, defeating respect-and-note. Classification is
+  DEFERRED: adopt as `open` (intent token retained), claim nothing, report it explicitly; the
+  next determinate apply classifies through the existing machinery (still-stale + closed →
+  the live-mirror reality check posts the one note and records `dismissed`; resolved → the
+  resolve path records record-only `resolved`). No new states invented — the open+reality-check
+  machinery already lands both directions on the ratified semantics. The full matrix: not
+  found / deleted → intent cleared; found + not-evaluated → adopt open, defer; found open +
+  evaluated → adopt + same-run resolution; found closed + evaluated → adopt + record-only.
 
 ## R11 — Resolution-detail classification via the current citation set (review round 3, P2-3)
 

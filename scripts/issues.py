@@ -435,6 +435,10 @@ class PlanRow:
     fact: Optional[StalenessFact] = None    # present when the fact is current
     record: Optional[MirrorRecord] = None   # present when a mirror exists
     detail: str = ""
+    # Whether THIS run's freshness was determinately evaluated (round 9 P2-2):
+    # rows that proceed regardless of evaluation (creating-recovery) carry the
+    # flag so apply defers any RESOLUTION claim on a not-evaluated run.
+    evaluated: bool = True
 
     @property
     def key(self) -> P.PinKey:
@@ -548,12 +552,15 @@ def issues_plan(facts, mirrors, pins=None, evaluated=True, cited_keys=None) -> l
                                 detail="completing pending close (audit comment already posted)"))
         elif rec.status == "creating":
             # R10: an interrupted create whose fact is now gone — apply reconciles by
-            # marker (found → adopt for a normal lifecycle; not found → clear the
-            # intent). Independent of this run's evaluation status: the probe decides
-            # existence, never resolution.
+            # marker (found → adopt; not found → clear the intent). The PROBE is
+            # independent of this run's evaluation status — it decides existence,
+            # never resolution — but any RESOLUTION claim is not (round 9 P2-2):
+            # the row carries `evaluated` so apply defers classification when the
+            # fact's absence is "not evaluated" rather than "confirmed resolved".
             rows.append(PlanRow("resolve", rec.citing, rec.relation, rec.value, record=rec,
                                 detail="recovering interrupted create — reconciling "
-                                       "with the tracker by marker"))
+                                       "with the tracker by marker",
+                                evaluated=evaluated))
         elif not evaluated:
             # R8: the fact's absence is NOT a confirmed resolution this run.
             rows.append(PlanRow("skip", rec.citing, rec.relation, rec.value, record=rec,
@@ -896,6 +903,22 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
         record(replace(rec, status="dismissed"))
         report.append(_audit("dismissed", row, rec.issue, note))
 
+    def close_with_audit(row: PlanRow, rec: MirrorRecord) -> None:
+        """The R9 two-step on an OPEN issue: persist the `resolving` intent (the
+        record's stored token preferred — round 8), post the audit comment from
+        the persisted record, close, record `resolved`. Shared by the fresh
+        resolve path and same-run recovery completion (round 9 P2-1) — one
+        machinery, never a parallel copy."""
+        resolving = replace(rec, status="resolving",
+                            token=rec.token or _search_token(ns, row.key, rec.lifecycle))
+        record(resolving)
+        transport.comment(resolving.repo, resolving.issue,
+                          render_resolution_comment(resolving, row.detail, ns))
+        transport.close(resolving.repo, resolving.issue)
+        record(replace(resolving, status="resolved"))
+        report.append(_audit("resolved", row, resolving.issue,
+                             row.detail or "closed with audit comment"))
+
     for row in rows:
         if row.disposition == "skip":
             continue
@@ -992,11 +1015,15 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
             rec = row.record
             assert rec is not None
             if rec.status == "creating":
-                # R10 recovery, fact no longer present: probe by the LIFECYCLE-scoped
-                # marker, then VERIFY the found issue's state (round 5 P1) — found
-                # open → adopt (a normal lifecycle resolves it next run); found
-                # closed → the resolution is already complete: record-only; not
-                # found / deleted → the create never happened, clear the intent.
+                # R10 recovery, fact no longer present: probe by the stored token,
+                # then VERIFY the found issue's state (round 5 P1). Not found /
+                # deleted → the create never happened: clear the intent. Found:
+                # adopt, then — round 9 — classify only with determinate evidence:
+                # evaluated → complete the FULL resolution in this same run
+                # (open → the R9 two-step; closed → record-only); NOT evaluated →
+                # record `open` and claim nothing (round 9 P2-2) — the next
+                # determinate apply classifies through the normal machinery
+                # (reality check → dismissed, or resolve path → resolved).
                 found = transport.find_by_marker(rec.repo, rec.token)
                 if found is None:
                     found = transport.find_by_marker_in_recent(rec.repo, rec.token)
@@ -1005,27 +1032,33 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                     report.append(_audit("recorded", row, None,
                                          "interrupted create never happened — "
                                          "intent cleared"))
+                    mutated = True
+                    continue
+                try:
+                    state = transport.get_state(rec.repo, found)
+                except IssueNotFound:
+                    state = None                # vanished between search and read
+                if state is None:
+                    erase(row.key)
+                    report.append(_audit("recorded", row, None,
+                                         "interrupted create was deleted "
+                                         "repo-side — intent cleared"))
+                    mutated = True
+                    continue
+                adopted = replace(rec, issue=found, status="open")
+                record(adopted)
+                if not row.evaluated:
+                    report.append(_audit("adopted", row, found,
+                                         "interrupted create recovered — "
+                                         "classification deferred (freshness "
+                                         "not evaluated)"))
+                elif state == "closed":
+                    record(replace(adopted, status="resolved"))
+                    report.append(_audit("recorded", row, found,
+                                         "adopted interrupted create found closed; "
+                                         "resolution recorded"))
                 else:
-                    try:
-                        state = transport.get_state(rec.repo, found)
-                    except IssueNotFound:
-                        state = None            # vanished between search and read
-                    if state == "open":
-                        record(replace(rec, issue=found, status="open"))
-                        report.append(_audit("adopted", row, found,
-                                             "interrupted create recovered — issue "
-                                             "found by marker; lifecycle continues "
-                                             "next run"))
-                    elif state == "closed":
-                        record(replace(rec, issue=found, status="resolved"))
-                        report.append(_audit("recorded", row, found,
-                                             "adopted interrupted create found closed; "
-                                             "resolution recorded"))
-                    else:
-                        erase(row.key)
-                        report.append(_audit("recorded", row, None,
-                                             "interrupted create was deleted "
-                                             "repo-side — intent cleared"))
+                    close_with_audit(row, adopted)
                 mutated = True
                 continue
             if rec.status == "dismissing":
@@ -1062,21 +1095,18 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                 # marker-checks the issue's comments (one bounded, issue-scoped
                 # read) before re-posting, then completes the close — no duplicate
                 # audit comments, no close without its audit trail.
-                if rec.status != "resolving":
-                    record(replace(rec, status="resolving",
-                                   token=_search_token(ns, row.key, rec.lifecycle)))
-                    transport.comment(rec.repo, rec.issue,
-                                      render_resolution_comment(mirrors[row.key],
-                                                                row.detail, ns))
-                elif not transport.has_comment_marker(rec.repo, rec.issue, rec.token):
-                    # round 8 P2-1: the posted marker carries the STORED token —
-                    # the very value the check above just looked for
-                    transport.comment(rec.repo, rec.issue,
-                                      render_resolution_comment(rec, row.detail, ns))
-                transport.close(rec.repo, rec.issue)
-                record(replace(mirrors[row.key], status="resolved"))
-                report.append(_audit("resolved", row, rec.issue,
-                                     row.detail or "closed with audit comment"))
+                if rec.status == "resolving":
+                    # retry entry: marker-check with the STORED token before ever
+                    # re-posting (rounds 7/8), then complete the close
+                    if not transport.has_comment_marker(rec.repo, rec.issue, rec.token):
+                        transport.comment(rec.repo, rec.issue,
+                                          render_resolution_comment(rec, row.detail, ns))
+                    transport.close(rec.repo, rec.issue)
+                    record(replace(rec, status="resolved"))
+                    report.append(_audit("resolved", row, rec.issue,
+                                         row.detail or "closed with audit comment"))
+                else:
+                    close_with_audit(row, rec)
             mutated = True
     return mutated
 

@@ -925,7 +925,9 @@ def test_interrupted_create_with_fact_resolved_clears_intent(tmp_path):
     assert len(report) == 1 and "intent cleared" in report[0]
 
 
-def test_interrupted_create_with_fact_resolved_adopts_found_issue(tmp_path, monkeypatch):
+def test_interrupted_create_with_fact_resolved_completes_in_one_apply(tmp_path, monkeypatch):
+    """Round 9 P2-1: adopt-then-wait left an obsolete issue open after a
+    'successful' recovery run — the full resolution now completes SAME-run."""
     src, build, cfg, root, facts, k = _one_stale_enabled(tmp_path)
     real = ISS.write_mirrors
     n = {"count": 0}
@@ -940,20 +942,146 @@ def test_interrupted_create_with_fact_resolved_adopts_found_issue(tmp_path, monk
     t = FakeTransport()
     with pytest.raises(ISS.EmissionError):
         _apply(build, cfg, root, facts, t)                 # created remotely, unrecorded
+    stored = ISS.load_mirrors(build)[k].token
+    monkeypatch.setattr(ISS, "write_mirrors", real)
+    assert R.main([str(build), "--apply"]) == 0            # fact resolves meanwhile
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t2 = FakeTransport()
+    t2.seeded_issue_bodies[101] = t.created[101]           # still open on the tracker
+    rows, report, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t2)
+    assert t2.of("create") == []                           # adopted, never duplicated
+    assert len(t2.of("comment")) == 1                      # audit comment posted SAME run
+    assert f"token={stored}" in t2.posted[101][0]          # stored-token marker (round 8)
+    assert len(t2.of("close")) == 1                        # issue closed SAME run
+    rec = _mirrors(build)[k]
+    assert rec.status == "resolved" and rec.issue == 101   # ONE apply, lifecycle complete
+
+
+def test_recovered_resolution_failure_mid_sequence_stays_resumable(tmp_path, monkeypatch):
+    src, build, cfg, root, facts, k = _one_stale_enabled(tmp_path)
+    real = ISS.write_mirrors
+    n = {"count": 0}
+
+    def flaky(root_, records):
+        n["count"] += 1
+        if n["count"] == 2:
+            raise OSError("disk full")
+        return real(root_, records)
+
+    monkeypatch.setattr(ISS, "write_mirrors", flaky)
+    t = FakeTransport()
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)                 # created remotely, unrecorded
+    stored = ISS.load_mirrors(build)[k].token
+    monkeypatch.setattr(ISS, "write_mirrors", real)
     assert R.main([str(build), "--apply"]) == 0            # fact resolves meanwhile
     cfg, root = V.load_config(build)
     issues, _ = V.validate(cfg, root)
     t2 = FakeTransport()
     t2.seeded_issue_bodies[101] = t.created[101]
-    rows, report, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t2)
-    assert t2.of("create") == []
-    rec = _mirrors(build)[k]
-    assert rec.status == "open" and rec.issue == 101       # adopted; resolves next run
+    t2.fail["close"] = ISS.EmissionError("HTTP 502")       # dies between comment and close
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, ISS.staleness_facts(issues), t2)
+    rec = ISS.load_mirrors(build)[k]
+    assert rec.status == "resolving" and rec.issue == 101  # resumable intent persisted
+    assert rec.token == stored                             # …with the stored token
     t3 = FakeTransport()
     t3.states[101] = "open"
-    rows3, report3, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t3)
-    assert [r.disposition for r in rows3] == ["resolve"]
+    t3.seeded_comments[101] = list(t2.posted.get(101, []))
+    rows, report, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t3)
+    assert t3.of("comment") == []                          # marker found — no re-post
+    assert len(t3.of("close")) == 1
     assert _mirrors(build)[k].status == "resolved"
+
+
+def _reenable_freshness(build):
+    f = build / ".spec-arch-governance.yml"
+    f.write_text(f.read_text().replace(
+        "adr_immutability: false, citations_fresh: false", "adr_immutability: false"))
+
+
+def test_not_evaluated_recovery_defers_classification(tmp_path, monkeypatch):
+    """Round 9 P2-2: a human-closed adopted issue under a NOT-evaluated run must
+    not be recorded `resolved` — there is zero evidence the fact resolved. Adopt
+    as `open`, claim nothing; the next determinate apply classifies."""
+    src, build, cfg, root, facts, k = _one_stale_enabled(tmp_path)
+    real = ISS.write_mirrors
+    n = {"count": 0}
+
+    def flaky(root_, records):
+        n["count"] += 1
+        if n["count"] == 2:
+            raise OSError("disk full")
+        return real(root_, records)
+
+    monkeypatch.setattr(ISS, "write_mirrors", flaky)
+    t = FakeTransport()
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)                 # created remotely, unrecorded
+    stored = ISS.load_mirrors(build)[k].token
+    monkeypatch.setattr(ISS, "write_mirrors", real)
+    _disable_freshness(build)                              # next run: NOT evaluated
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t2 = FakeTransport()
+    t2.seeded_issue_bodies[101] = t.created[101]
+    t2.states[101] = "closed"                              # human closed it meanwhile
+    rows, report, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t2)
+    assert t2.of("comment") == [] and t2.of("close") == []
+    rec = _mirrors(build)[k]
+    assert rec.status == "open" and rec.issue == 101       # adopted — NO claim made
+    assert rec.token == stored                             # intent token retained
+    assert any("deferred" in ln for ln in report)          # said explicitly
+    # evaluation resumes; the fact is STILL stale → the normal reality check
+    # posts the ONE respect-and-note comment — never a new issue
+    _reenable_freshness(build)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts3 = ISS.staleness_facts(issues)
+    assert len(facts3) == 1
+    t3 = FakeTransport()
+    t3.states[101] = "closed"
+    rows3, report3, _ = _apply(build, cfg, root, facts3, t3)
+    assert len(t3.of("comment")) == 1                      # exactly one note
+    assert t3.of("create") == []                           # NO duplicate lifecycle
+    assert _mirrors(build)[k].status == "dismissed"        # ratified respect-and-note
+
+
+def test_not_evaluated_recovery_then_resolved_is_record_only(tmp_path, monkeypatch):
+    src, build, cfg, root, facts, k = _one_stale_enabled(tmp_path)
+    real = ISS.write_mirrors
+    n = {"count": 0}
+
+    def flaky(root_, records):
+        n["count"] += 1
+        if n["count"] == 2:
+            raise OSError("disk full")
+        return real(root_, records)
+
+    monkeypatch.setattr(ISS, "write_mirrors", flaky)
+    t = FakeTransport()
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)
+    monkeypatch.setattr(ISS, "write_mirrors", real)
+    _disable_freshness(build)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t2 = FakeTransport()
+    t2.seeded_issue_bodies[101] = t.created[101]
+    t2.states[101] = "closed"
+    _apply(build, cfg, root, ISS.staleness_facts(issues), t2)
+    assert _mirrors(build)[k].status == "open"             # deferred, no claim
+    # evaluation resumes and the fact RESOLVED → record-only, no comment
+    _reenable_freshness(build)
+    assert R.main([str(build), "--apply"]) == 0
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t3 = FakeTransport()
+    t3.states[101] = "closed"
+    rows3, report3, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t3)
+    assert t3.of("comment") == [] and t3.of("close") == []
+    assert _mirrors(build)[k].status == "resolved"         # record-only, honest
 
 
 def test_dismissal_note_retry_never_double_posts(tmp_path, monkeypatch):
