@@ -93,15 +93,20 @@ def abbrev(digest: str) -> str:
 
 
 def load_pins(repo_root) -> dict[PinKey, Pin]:
-    """Read this repo's pins. Absent file → {} (a repo that never pinned — US3).
-    Malformed file → PinLoadError; the caller degrades per its own surface (FR-008)."""
+    """Read this repo's pins. Only a MISSING file → {} (a repo that never pinned — US3).
+    An existing-but-broken file — including one that parses to nothing (truncation, a
+    merge mishap) — is PinLoadError: tracked freshness state exists and is corrupted,
+    which must surface as the malformed-file note, never as merely 'unpinned' (FR-008)."""
     f = Path(repo_root) / PIN_FILE
     if not f.is_file():
         return {}
     try:
         data = yaml.safe_load(f.read_text(encoding="utf-8"))
         if data is None:
-            return {}
+            # absent ≠ present-but-empty: an empty pin file was TRACKED state once —
+            # the writer never emits one, so its emptiness is corruption, not adoption.
+            raise PinLoadError("pin file is empty — expected a pins document "
+                               "(truncated or merge-damaged?)")
         pins = [
             # paths normalized on READ too, so an existing native-separator pin file
             # (e.g. one written on Windows) still matches a POSIX scan

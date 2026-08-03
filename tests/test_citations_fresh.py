@@ -94,6 +94,33 @@ def test_load_pins_absent_vs_malformed(tmp_path):
         pass
 
 
+def test_empty_pin_file_is_malformed_not_absent(tmp_path):
+    """Only a MISSING pin file means 'never pinned'. An existing file that parses to
+    nothing (truncation, merge mishap) is corrupted TRACKED state and must surface as
+    the malformed-file note — not silently read as merely unpinned, which would let a
+    blocking repo proceed without learning its freshness state was destroyed."""
+    _, build = _domain(tmp_path)
+    # missing file: the adoption path — plain unpinned nudges, NO malformed note
+    _, _, issues = _validate(build)
+    assert not [i for i in _fresh(issues) if P.PIN_FILE in i.detail]
+    assert sum("is unpinned" in i.detail for i in _fresh(issues)) == 2
+    for variant in ("", "\n\n", "# comment only, no document\n"):
+        (build / P.PIN_FILE).write_text(variant)
+        try:
+            P.load_pins(build)
+            assert False, f"empty variant {variant!r} must raise PinLoadError"
+        except P.PinLoadError:
+            pass
+        _, _, issues = _validate(build)
+        notes = _fresh(issues)
+        malformed = [n for n in notes if P.PIN_FILE in n.detail]
+        assert len(malformed) == 1 and malformed[0].severity == "note", repr(variant)
+        assert _fresh_fails(issues) == [], repr(variant)      # a note, never a failure
+    # an empty-but-VALID document (the zero-citation rebuild output) still loads cleanly
+    (build / P.PIN_FILE).write_text("version: v1\npins: []\n")
+    assert P.load_pins(build) == {}
+
+
 def test_pins_to_yaml_is_deterministic():
     p1 = P.Pin("specs/b/spec.md", "derived_from", "docs:x", "p", "sha256:aa", "2026-08-03")
     p2 = P.Pin("specs/a/plan.md", "cites", "CORE-ADR-001", "q", "sha256:bb", "2026-08-03")

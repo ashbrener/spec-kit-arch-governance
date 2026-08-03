@@ -71,3 +71,26 @@ enforcement, not vocabulary — spec Assumptions).
 
 ## R10 — No new dependency
 Hashing is stdlib `hashlib`; dates are stdlib `datetime.date`. Deps stay pydantic + pyyaml.
+
+## R11 — Present-but-empty is malformed, not absent (review round 3, completing R2)
+Only a MISSING pin file means "this repo never pinned" (US3 adoption → `{}`). An existing file
+that parses to nothing (truncation, a merge mishap) is corrupted TRACKED state: the writer never
+emits an empty document, so `load_pins` raises `PinLoadError` and the malformed-file path owns it
+(one indeterminate note). Treating it as absent would report the citations as merely unpinned and
+let a blocking repo proceed without ever learning its freshness state was destroyed. Same doctrine
+for digests: a pin digest must match `sha256:<64 hex>`; anything else (null, truncated hash,
+conflict residue) is the malformed file, never a comparable pin — a garbage digest would otherwise
+compare unequal forever and masquerade as a *determinate* stale failure that can halt.
+
+## R12 — Selector over a malformed pin file: REFUSE (review round 3)
+The selector's contract is US2-3/FR-010: "only the matching pin entries are written; **all others
+are untouched**." Over an unparseable file that promise is unsatisfiable — the non-matching pins
+cannot be carried verbatim, so a selector-scoped `--apply` would rebuild a file containing only
+the selected subset and silently discard freshness tracking for everything else. Two candidate
+behaviours: (a) ignore the selector during a rebuild with a printed notice, or (b) refuse the
+combination. **Chosen: (b) refuse** (`RepinRefused` → stderr + exit 2, telling the operator to
+re-run without a selector). Rationale: (a) silently widens the operator's expressed scope — the
+operation performed would not be the operation requested — while (b) fails fast with an
+actionable path and keeps the selector's "others untouched" guarantee unconditionally true
+whenever a selector run succeeds. A full (unselected) rebuild remains apply-worthy even when the
+rebuilt pin list is empty — an empty-but-valid pin file IS the rebuild.

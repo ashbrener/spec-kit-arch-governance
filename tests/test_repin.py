@@ -175,6 +175,27 @@ def test_malformed_pin_file_with_zero_citations_is_still_rebuilt_on_apply(tmp_pa
     assert _fresh(issues) == []                              # unstuck — no malformed note left
 
 
+def test_selector_over_malformed_pin_file_is_refused(tmp_path, capsys):
+    """R12: a selector promises 'all others untouched' — impossible over an unparseable
+    file, where a scoped rebuild would silently drop every non-matching pin. The
+    combination is refused (exit 2, nothing written); a full unselected rerun rebuilds
+    the COMPLETE citation set, so the pin file is never missing nonselected citations."""
+    _, build = _domain(tmp_path)
+    (build / P.PIN_FILE).write_text("{{{ not yaml")
+    for argv in ([str(build), "CORE-ADR-001"],                   # dry-run refuses too
+                 [str(build), "CORE-ADR-001", "--apply"]):
+        assert R.main(argv) == 2
+        err = capsys.readouterr().err
+        assert "refused" in err and "selector" in err
+        assert "WITHOUT a selector" in err                       # the actionable path
+        assert (build / P.PIN_FILE).read_text() == "{{{ not yaml"  # nothing written
+    # the operator reruns unselected: the FULL set is rebuilt — nothing dropped
+    assert R.main([str(build), "--apply"]) == 0
+    pins = _pins(build)
+    assert {(k[1], k[2]) for k in pins} == {("derived_from", "docs:005-fund-model"),
+                                            ("cites", "CORE-ADR-001")}
+
+
 # ── install: the nudge, never the write (OQ-4) ──
 
 def test_install_prints_repin_nudge_and_never_writes_pins(tmp_path, capsys):

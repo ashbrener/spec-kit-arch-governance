@@ -12,9 +12,14 @@ maintainers*, not as an interop promise.
 - Per-repo, at the repo root, beside `.spec-arch-governance.yml`.
 - Generated — written **only** by `repin --apply` (FR-011). Lockfile-like, **tracked in git**:
   its history answers *which upstream state was accepted, when* (SC-006).
-- Absent file = a repo that never pinned (all citations unpinned → nudges only, US3).
+- Absent file = a repo that never pinned (all citations unpinned → nudges only, US3). Only a
+  MISSING file means this — an existing-but-empty file is corrupted tracked state (below).
 - Malformed file = a single indeterminate note at validate time; all citations treated as
-  unpinned for that run (FR-008). `repin` warns and rebuilds it on `--apply`.
+  unpinned for that run (FR-008). `repin` warns and rebuilds it on `--apply` (full set only —
+  a selector over a malformed file is refused, research R12). "Malformed" includes: unparseable
+  YAML, wrong shape, an empty/None-parsing document (truncation, merge mishap — the writer never
+  emits one), and any pin digest not matching `sha256:<64 lowercase hex>` (a garbage digest must
+  never become a comparable pin that fakes a determinate stale failure).
 
 ## Shape
 

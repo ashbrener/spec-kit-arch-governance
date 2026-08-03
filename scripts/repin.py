@@ -69,6 +69,11 @@ class RepinPlan:
         return self.keep + [e.new_pin for e in self.entries if e.new_pin is not None]
 
 
+class RepinRefused(Exception):
+    """The requested operation cannot honor repin's contract and is refused outright
+    (e.g. a selector over a malformed pin file — see repin_plan). Maps to exit 2."""
+
+
 def _feature_of(relpath: str) -> str:
     parts = Path(relpath).parts
     return parts[-2] if len(parts) >= 2 else ""
@@ -91,6 +96,17 @@ def repin_plan(cfg, repo_root: Path, selector: Optional[str] = None,
     try:
         pins = dict(P.load_pins(repo_root))
     except P.PinLoadError as exc:
+        if selector:
+            # A selector promises "only the matching pin entries are written; all others
+            # are untouched" (US2-3/FR-010). Over an unparseable file that promise is
+            # impossible — the non-matching pins cannot be carried, so a scoped rebuild
+            # would silently discard freshness tracking for everything else. Refuse;
+            # never silently widen the operator's expressed scope.
+            raise RepinRefused(
+                f"pin file {P.PIN_FILE} is malformed ({exc}) and a selector was given — "
+                f"non-matching pins cannot be carried verbatim from an unparseable file, "
+                f"so a selector-scoped rebuild would silently drop them. "
+                f"Re-run `repin` WITHOUT a selector to rebuild the full pin set.") from exc
         plan.notes.append(f"pin file {P.PIN_FILE} is malformed ({exc}) — --apply will rebuild it "
                           f"from the current citation set")
         plan.rebuild = True   # apply-worthy even when the rebuilt pin list is empty
@@ -166,7 +182,11 @@ def main(argv=None) -> int:
     args = p.parse_args(sys.argv[1:] if argv is None else list(argv))
 
     cfg, repo_root = V.load_config(args.repo)
-    plan = repin_plan(cfg, repo_root, args.selector)
+    try:
+        plan = repin_plan(cfg, repo_root, args.selector)
+    except RepinRefused as exc:
+        print(f"repin: refused — {exc}", file=sys.stderr)
+        return 2
     applied = bool(args.apply and plan.writes)
     if applied:
         (repo_root / P.PIN_FILE).write_text(P.pins_to_yaml(plan.result_pins()), encoding="utf-8")

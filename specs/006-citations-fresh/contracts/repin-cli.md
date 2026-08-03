@@ -12,7 +12,8 @@ uv run python scripts/repin.py <repo-dir> [selector] [--apply]
 | pin with no matching citation | plan `prune`; `--apply` removes the entry (FR-007 pairing) |
 | citation failing `citations_resolve` / unreadable target | plan `skip` with the reason; never pinned (FR-010 — a pin must not launder a broken citation); an existing pin is carried verbatim |
 | selector given | only entries whose citation value contains / equals the selector, or whose citing feature id equals it, participate; all others carried verbatim (US2-3) |
-| malformed pin file | warned in the plan; `--apply` rebuilds it from the current citation set |
+| malformed pin file (no selector) | warned in the plan; `--apply` rebuilds it from the FULL current citation set — apply-worthy even when the rebuilt pin list is empty (an empty-but-valid file IS the rebuild) |
+| malformed pin file + selector | **refused** (exit 2, actionable message): "others untouched" cannot be honored over an unparseable file, and a scoped rebuild would silently drop the non-matching pins — re-run without a selector (research R12) |
 | no changes to make | nothing written (idempotent: a second `--apply` is a byte-identical no-op) |
 
 Guarantees:
@@ -23,4 +24,5 @@ Guarantees:
   `validate`, `gate`, hooks, `install`, `sync` leave it byte-identical.
 - Deterministic serialization (sorted by pin key) → reviewable diffs; the file's git history is
   the audit trail (SC-006).
-- Exit code: 0 (reporting verb; a plan is not an error).
+- Exit code: 0 (reporting verb; a plan is not an error). Exception: 2 when the operation is
+  refused outright (selector over a malformed pin file) — nothing is written on a refusal.
