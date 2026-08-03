@@ -34,7 +34,7 @@ mirrors:
   rewrites byte-identical content.
 - **Lifecycle** (round 5 P1): the ordinal is sourced from the SIDECAR (the retained
   predecessor record), never from tracker state; the emitter's body/comment marker embeds it
-  (`… lifecycle=N -->`), and recovery adoption additionally VERIFIES the found issue's state
+  (`… token=<32-hex> … lifecycle=N -->`; recovery reads match on the fixed-length token — round 6 P2), and recovery adoption additionally VERIFIES the found issue's state
   against the intent being recovered — a closed hit is handled explicitly (operator-closure
   respect-and-note for a still-stale fact; record-only resolution for a resolved one), never
   a silent adopt into `open`.

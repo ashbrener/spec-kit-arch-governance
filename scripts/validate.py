@@ -102,15 +102,29 @@ def split_front_matter(text: str):
     return {}, text
 
 
+# The OPENING front-matter delimiter alone — same position rule as _FM_RE (start of
+# file). Detected independently of the full block (round 6 P1-2): a file that OPENS
+# a front-matter block but never validly terminates it must read as MALFORMED, not
+# as "no block" — otherwise a damaged closing delimiter silently counts the run as
+# determinately evaluated.
+_FM_OPEN_RE = re.compile(r"^---\s*\n")
+
+
 def front_matter_malformed(text: str) -> bool:
-    """A front-matter BLOCK exists but does not parse to a mapping (slice 007 R8's
-    harvest layer): a PARSE FAILURE of the citation source is 'cannot evaluate',
-    never 'citations absent'. A file with no front-matter block at all is NOT
-    malformed — its citations are honestly absent. Side-channel only: this never
-    changes what split_front_matter returns or any check's existing findings."""
+    """A front-matter block was OPENED but does not parse to a mapping (slice 007
+    R8's harvest layer): a PARSE FAILURE of the citation source is 'cannot
+    evaluate', never 'citations absent'. Covers an unterminated/damaged-closer
+    block (opening delimiter present, full-block regex not matching — round 6
+    P1-2) as well as unparseable/non-mapping YAML inside a well-formed block. A
+    file with no OPENING delimiter at all is NOT malformed — its citations are
+    honestly absent (a mid-document `---` horizontal rule never triggers this).
+    Side-channel only: this never changes what split_front_matter returns or any
+    check's existing findings."""
+    if not _FM_OPEN_RE.match(text):
+        return False
     m = _FM_RE.match(text)
     if not m:
-        return False
+        return True             # opened, never (validly) terminated
     try:
         fm = yaml.safe_load(m.group(1))
     except yaml.YAMLError:

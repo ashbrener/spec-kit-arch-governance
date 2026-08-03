@@ -16,7 +16,9 @@ The structured form of one determinate `citations_fresh` failure — the emitter
 
 **Identity** (OQ-A): the pin key `(citing, relation, value)` — same key as `.spec-arch-pins.yml`.
 **D5 refinement (round 5 P1)**: rendered content is deterministic PER LIFECYCLE — same fact,
-same lifecycle ⇒ same bytes (the marker embeds `lifecycle=N`).
+same lifecycle ⇒ same bytes. The marker embeds `lifecycle=N` and a fixed-length 32-hex search
+token (round 6 P2: `sha256(namespace|citing|relation|value|lifecycle)` truncated) — recovery
+reads match on the TOKEN, so search query length is bounded regardless of identity size.
 **Content state**: the `(pinned_digest, current_digest)` pair.
 **Invariant**: a fact exists ⟺ the engine emitted a `citations_fresh` failure-severity finding
 with it attached; the emitter never constructs facts itself.
@@ -123,7 +125,7 @@ every existing config file stays valid.
 
 | Method | Contract |
 |---|---|
-| `get_state(repo, number) -> str` | `open` \| `closed`; failure → `EmissionError` |
+| `get_state(repo, number) -> str` | `open` \| `closed`; an issue 404 is disambiguated with ONE bounded repo probe (round 6 P1-1) — repo reachable → `IssueNotFound` (genuine deletion), repo unreachable → plain `EmissionError` (access failure, row untouched); other failures → `EmissionError` |
 | `find_by_marker(repo, marker) -> int \| None` | ONE bounded repo-scoped search for the deterministic body marker (R10 recovery); failure → `EmissionError` |
 | `has_comment_marker(repo, number, marker) -> bool` | ONE bounded issue-scoped comment scan for the marker (R10 recovery); failure → `EmissionError` |
 | `create(repo, title, body, labels) -> int` | returns issue number |

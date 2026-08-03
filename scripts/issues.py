@@ -28,6 +28,7 @@ Contract highlights (specs/007-issue-emitter/contracts/issues-cli.md):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -274,13 +275,28 @@ def write_mirrors(repo_root, records) -> None:
 
 # ──────────────────────────── deterministic content (D5/R6) ────────────────────────────
 
+def _search_token(namespace: str, key: P.PinKey, lifecycle: int) -> str:
+    """The fixed-length SEARCH token (round 6 P2): sha256 over the full identity
+    (namespace | pin key | lifecycle), truncated to 32 hex chars. Every recovery
+    read — the repo-scoped search AND the issue-scoped comment scan — matches on
+    this token, so query length is bounded no matter how long the citing path or
+    citation value grows (a full-identity query could exceed GitHub's search query
+    limits, 422-ing every recovery and sticking the row in `creating` forever).
+    Deterministic per (namespace, key, lifecycle) — the D5 refinement holds."""
+    basis = f"{namespace}|{key[0]}|{key[1]}|{key[2]}|{lifecycle}"
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:32]
+
+
 def _marker(namespace: str, key: P.PinKey, lifecycle: int) -> str:
     """Human-forensics + recovery marker in emitter-owned bodies/comments. The
     SIDECAR, not the marker, is the source of truth for dedup (R6); the marker is
     the R10 recovery rendezvous, and is LIFECYCLE-SCOPED (round 5 P1) so an
     interrupted replacement create can never rendezvous with a previous
-    lifecycle's closed issue. D5 refinement: same fact, same lifecycle ⇒ same bytes."""
+    lifecycle's closed issue. D5 refinement: same fact, same lifecycle ⇒ same bytes.
+    Embeds the fixed-length search TOKEN (round 6 P2) — the recovery reads match on
+    the token; the human-readable identity rides alongside for forensics only."""
     return (f"<!-- {namespace}-governance issues v1 "
+            f"token={_search_token(namespace, key, lifecycle)} "
             f"key={key[0]}|{key[1]}|{key[2]} lifecycle={lifecycle} -->")
 
 
@@ -589,9 +605,14 @@ class GhTransport:
                 "-f", "state=closed"]
 
     def _argv_find_by_marker(self, repo: str, marker: str) -> list[str]:
-        # one bounded search, scoped to the configured repo + the deterministic marker
+        # one bounded search, scoped to the configured repo + the fixed-length token
+        # (round 6 P2: the token keeps the query bounded whatever the identity size)
         return [self.gh, "api", "-X", "GET", "search/issues",
                 "-f", f'q=repo:{repo} in:body "{marker}"']
+
+    def _argv_repo(self, repo: str) -> list[str]:
+        # the 404-disambiguation probe (round 6 P1-1) — issue-404 path only
+        return [self.gh, "api", f"repos/{repo}"]
 
     def _argv_list_comments(self, repo: str, number: int) -> list[str]:
         # FULLY paginated (round 5 P2-1): the default page size (30) would hide a
@@ -628,7 +649,26 @@ class GhTransport:
         return data
 
     def get_state(self, repo: str, number: int) -> str:
-        state = self._json(self._run(self._argv_get_state(repo, number))).get("state")
+        try:
+            out = self._run(self._argv_get_state(repo, number))
+        except IssueNotFound:
+            # Round 6 P1-1 (the W36 doctrine at the tracker layer): GitHub 404s
+            # BOTH a deleted issue AND a repo the ambient credential cannot
+            # currently access. Not-found is a VERDICT, unreachable is a FAILURE —
+            # disambiguate with ONE bounded probe of the repository itself, on the
+            # 404 path only (zero cost on healthy runs).
+            try:
+                self._run(self._argv_repo(repo))
+            except EmissionError as probe_exc:
+                raise EmissionError(
+                    f"issue #{number} in {repo} returned not-found, but the "
+                    f"repository itself is not accessible ({probe_exc}) — cannot "
+                    f"distinguish a deleted issue from an access problem; fix the "
+                    f"credential/scope and re-run") from probe_exc
+            raise IssueNotFound(
+                f"issue #{number} in {repo} was deleted (the repository is "
+                f"accessible)") from None
+        state = self._json(out).get("state")
         if state not in ("open", "closed"):
             raise EmissionError(f"issue #{number} in {repo} has unexpected state {state!r}")
         return state
@@ -760,7 +800,7 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
         # R10 recovery: the note may or may not have posted — ONE bounded,
         # issue-scoped marker check decides; never a second note.
         if not transport.has_comment_marker(rec.repo, rec.issue,
-                                            _marker(ns, row.key, rec.lifecycle)):
+                                            _search_token(ns, row.key, rec.lifecycle)):
             transport.comment(rec.repo, rec.issue,
                               render_dismissal_comment(f, ns, rec.lifecycle))
         record(replace(rec, status="dismissed"))
@@ -803,7 +843,7 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                 # issue's state against the intent being recovered — never a
                 # silent adopt into `open`.
                 found = transport.find_by_marker(rec.repo,
-                                                 _marker(ns, row.key, rec.lifecycle))
+                                                 _search_token(ns, row.key, rec.lifecycle))
                 if found is not None:
                     try:
                         state = transport.get_state(rec.repo, found)
@@ -865,7 +905,7 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                 # closed → the resolution is already complete: record-only; not
                 # found / deleted → the create never happened, clear the intent.
                 found = transport.find_by_marker(rec.repo,
-                                                 _marker(ns, row.key, rec.lifecycle))
+                                                 _search_token(ns, row.key, rec.lifecycle))
                 if found is None:
                     erase(row.key)
                     report.append(_audit("recorded", row, None,
@@ -933,7 +973,7 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                     transport.comment(rec.repo, rec.issue,
                                       render_resolution_comment(rec, row.detail, ns))
                 elif not transport.has_comment_marker(rec.repo, rec.issue,
-                                                      _marker(ns, row.key, rec.lifecycle)):
+                                                      _search_token(ns, row.key, rec.lifecycle)):
                     transport.comment(rec.repo, rec.issue,
                                       render_resolution_comment(rec, row.detail, ns))
                 transport.close(rec.repo, rec.issue)

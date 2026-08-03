@@ -96,6 +96,9 @@ class FakeTransport:
         self.seeded_comments = {}        # number -> [comment bodies]
         self.created = {}                # number -> body (created THIS run)
         self.posted = {}                 # number -> [comment bodies posted THIS run]
+        # round 6 P1-1: when False, reads raise plain EmissionError — an access
+        # problem is a FAILURE, never a deletion verdict
+        self.repo_accessible = True
 
     def _record(self, method, *args):
         self._counts[method] = self._counts.get(method, 0) + 1
@@ -108,11 +111,15 @@ class FakeTransport:
 
     def get_state(self, repo, number):
         self._record("get_state", repo, number)
+        if not self.repo_accessible:
+            raise ISS.EmissionError(
+                f"repository {repo} is not accessible — cannot read issue #{number}")
         state = self.states.get(number)
         if state is None and not self.strict_states:
             state = "open"
         if state in (None, "missing"):
-            raise ISS.IssueNotFound(f"issue #{number} not found in {repo}")
+            raise ISS.IssueNotFound(f"issue #{number} was deleted in {repo} "
+                                    f"(repository is accessible)")
         return state
 
     def create(self, repo, title, body, labels):
@@ -356,10 +363,11 @@ def test_render_title_and_body_are_deterministic_functions_of_the_fact(tmp_path)
     for needle in (fact.citing, fact.cited_display, P.abbrev(fact.pinned_digest),
                    P.abbrev(fact.current_digest), fact.pinned_date, "repin"):
         assert needle in body1
-    marker = ("<!-- API-governance issues v1 "
-              "key=specs/001-derived/spec.md|derived_from|docs:005-fund-model "
-              "lifecycle=1 -->")
+    marker = ISS._marker("API", fact.key, 1)
     assert marker in body1                    # forensics marker, lifecycle-scoped (R6/R10)
+    assert "key=specs/001-derived/spec.md|derived_from|docs:005-fund-model" in marker
+    assert "lifecycle=1" in marker
+    assert f"token={ISS._search_token('API', fact.key, 1)}" in marker   # round 6 P2
     import datetime
     assert str(datetime.date.today()) == fact.pinned_date or True   # no emission timestamps:
     assert "T" not in body1.split("repin")[0] or True               # (fields only, asserted above)
@@ -1092,15 +1100,232 @@ def test_gh_transport_recovery_reads_map_failures_to_emission_error(monkeypatch)
     assert "rate limit" in str(e2.value)
 
 
+# ═══ Review round 6 — P1-1: a 404 is a verdict only when the repo is reachable ═══
+# GitHub 404s BOTH deleted issues and repos the ambient credential cannot currently
+# access (W36 doctrine at the tracker layer): not-found is a VERDICT, unreachable is
+# a FAILURE. One bounded repo probe disambiguates — only on the 404 path.
+
+def test_issue_404_with_inaccessible_repo_is_failure_not_deletion(tmp_path):
+    src, build, k = _mirrored_stale(tmp_path)          # open mirror #101, still stale
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    before = (build / ISS.MIRROR_FILE).read_bytes()
+    t = FakeTransport()
+    t.states[101] = "missing"
+    t.repo_accessible = False                          # the 404 is an ACCESS problem
+    with pytest.raises(ISS.EmissionError) as exc:
+        _apply(build, cfg, root, facts, t)
+    assert not isinstance(exc.value, ISS.IssueNotFound)
+    assert t.of("create") == [] and t.of("comment") == []   # no new lifecycle, no note
+    assert (build / ISS.MIRROR_FILE).read_bytes() == before  # row untouched — retry later
+    # …access returns: the SAME issue is read normally, no duplicate ever created
+    t2 = FakeTransport()
+    t2.states[101] = "open"
+    rows, report, mutated = _apply(build, cfg, root, facts, t2)
+    assert t2.of("create") == [] and not mutated
+    assert _mirrors(build)[k].issue == 101
+
+
+def test_resolve_path_respects_access_failure(tmp_path):
+    src, build, k = _mirrored_stale(tmp_path)
+    assert R.main([str(build), "--apply"]) == 0        # fact resolves
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    before = (build / ISS.MIRROR_FILE).read_bytes()
+    t = FakeTransport()
+    t.states[101] = "missing"
+    t.repo_accessible = False
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, ISS.staleness_facts(issues), t)
+    assert (build / ISS.MIRROR_FILE).read_bytes() == before
+    assert _mirrors(build)[k].status == "open"         # never recorded resolved blind
+
+
+def test_create_recovery_verification_respects_access_failure(tmp_path, monkeypatch):
+    src, build, cfg, root, facts, k = _one_stale_enabled(tmp_path)
+    real = ISS.write_mirrors
+    n = {"count": 0}
+
+    def flaky(root_, records):
+        n["count"] += 1
+        if n["count"] == 2:
+            raise OSError("disk full")
+        return real(root_, records)
+
+    monkeypatch.setattr(ISS, "write_mirrors", flaky)
+    t = FakeTransport()
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)             # created remotely, unrecorded
+    t2 = FakeTransport()
+    t2.seeded_issue_bodies[101] = t.created[101]
+    t2.repo_accessible = False                         # access lost at retry time
+    with pytest.raises(ISS.EmissionError) as exc:
+        _apply(build, cfg, root, facts, t2)
+    assert not isinstance(exc.value, ISS.IssueNotFound)
+    assert t2.of("create") == []                       # never consumed blind
+    assert ISS.load_mirrors(build)[k].status == "creating"   # intent intact for retry
+
+
+def test_gh_get_state_disambiguates_404_with_one_repo_probe(monkeypatch):
+    g = ISS.GhTransport()
+    assert g._argv_repo("o/r") == ["gh", "api", "repos/o/r"]
+    calls = []
+
+    def issue_404_repo_ok(argv, capture_output, text):
+        calls.append(argv)
+        class R:
+            returncode = 0
+            stdout = '{"id": 1}'
+            stderr = ""
+        if len(calls) == 1:
+            R.returncode, R.stdout, R.stderr = 1, "", "gh: Not Found (HTTP 404)"
+        return R()
+
+    monkeypatch.setattr(ISS.subprocess, "run", issue_404_repo_ok)
+    with pytest.raises(ISS.IssueNotFound):             # repo reachable → genuine deletion
+        g.get_state("o/r", 9)
+    assert calls == [g._argv_get_state("o/r", 9), g._argv_repo("o/r")]
+
+    calls.clear()
+
+    def both_404(argv, capture_output, text):
+        calls.append(argv)
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = "gh: Not Found (HTTP 404)"
+        return R()
+
+    monkeypatch.setattr(ISS.subprocess, "run", both_404)
+    with pytest.raises(ISS.EmissionError) as exc:      # ambiguous → plain failure
+        g.get_state("o/r", 9)
+    assert not isinstance(exc.value, ISS.IssueNotFound)
+    assert "accessible" in str(exc.value) or "access" in str(exc.value)
+    assert calls == [g._argv_get_state("o/r", 9), g._argv_repo("o/r")]
+
+    calls.clear()
+
+    def healthy(argv, capture_output, text):
+        calls.append(argv)
+        class R:
+            returncode = 0
+            stdout = '{"state": "open"}'
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(ISS.subprocess, "run", healthy)
+    assert g.get_state("o/r", 9) == "open"
+    assert calls == [g._argv_get_state("o/r", 9)]      # zero probe cost on healthy runs
+
+
+# ═══ Review round 6 — P1-2: unterminated front matter is malformed, not absent ═══
+
+def test_unterminated_front_matter_preserves_open_mirrors(tmp_path):
+    src, build, k = _mirrored_stale(tmp_path)          # open mirror #101, still stale
+    spec = build / "specs" / "001-derived" / "spec.md"
+    spec.write_text("---\nderived_from:\n  - docs:005-fund-model\n# closing delimiter lost\n")
+    assert V.front_matter_malformed(spec.read_text()) is True
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    assert ISS.staleness_facts(issues) == []
+    assert not ISS.freshness_evaluated(cfg, issues)    # opened-but-unterminated = malformed
+    flagged = [i for i in issues if i.check == "citations_fresh" and i.indeterminate]
+    assert any("front matter" in i.detail for i in flagged)
+    before = (build / ISS.MIRROR_FILE).read_bytes()
+    t = FakeTransport()
+    rows, report, mutated = _apply(build, cfg, root, [], t)
+    by_key = {r.key: r for r in rows}
+    assert by_key[k].disposition == "skip"             # preserved, never closed
+    assert t.calls == [] and not mutated
+    assert (build / ISS.MIRROR_FILE).read_bytes() == before
+
+
+def test_damaged_closing_delimiter_is_malformed(tmp_path):
+    text = "---\nderived_from: []\n--\n# Derived spec\n"   # closer damaged: `--`
+    assert V.front_matter_malformed(text) is True
+
+
+def test_horizontal_rule_without_front_matter_stays_absent(tmp_path):
+    text = "# Title\n\nSome prose.\n\n---\n\nMore prose after a horizontal rule.\n"
+    assert V.front_matter_malformed(text) is False     # no OPENING delimiter — honest absence
+    src, build = _domain(tmp_path)
+    _pin(build)
+    (build / "specs" / "002-plainrule").mkdir(parents=True)
+    (build / "specs" / "002-plainrule" / "spec.md").write_text(text)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    assert ISS.freshness_evaluated(cfg, issues)        # never over-triggers
+
+
+# ═══ Review round 6 — P2: the SEARCH token is fixed-length, identity-independent ═══
+
+def test_search_token_is_fixed_length_and_stable():
+    import re as _re
+    long_key = ("specs/" + "x" * 500 + "/spec.md", "derived_from", "docs:" + "y" * 500)
+    tok = ISS._search_token("API", long_key, 3)
+    assert _re.fullmatch(r"[0-9a-f]{32}", tok)         # fixed 32-hex, whatever the identity
+    assert ISS._search_token("API", long_key, 3) == tok         # stable
+    assert ISS._search_token("API", long_key, 4) != tok         # lifecycle bump → new token
+    g = ISS.GhTransport()
+    argv = g._argv_find_by_marker("o/r", tok)
+    assert argv == ["gh", "api", "-X", "GET", "search/issues",
+                    "-f", f'q=repo:o/r in:body "{tok}"']
+    assert len(argv[-1]) < 100                         # bounded regardless of identity size
+
+
+def test_long_identity_recovery_still_adopts_via_token(tmp_path, monkeypatch):
+    src, build = _domain(tmp_path)
+    feature = "001-" + "long" * 45                     # a very long citing path
+    (build / "specs" / feature).mkdir(parents=True)
+    (build / "specs" / feature / "spec.md").write_text(
+        "---\nderived_from:\n  - docs:005-fund-model\n---\n# Long\n")
+    (build / "specs" / "001-derived" / "spec.md").write_text(
+        "---\nderived_from: []\n---\n# Derived spec\n")
+    _pin(build)
+    _go_stale(src)
+    _enable(build)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    assert len(facts) == 1 and len(facts[0].citing) > 150
+    k = facts[0].key
+    real = ISS.write_mirrors
+    n = {"count": 0}
+
+    def flaky(root_, records):
+        n["count"] += 1
+        if n["count"] == 2:
+            raise OSError("disk full")
+        return real(root_, records)
+
+    monkeypatch.setattr(ISS, "write_mirrors", flaky)
+    t = FakeTransport()
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)             # created remotely, unrecorded
+    t2 = FakeTransport()
+    t2.seeded_issue_bodies[101] = t.created[101]
+    rows, report, _ = _apply(build, cfg, root, facts, t2)
+    assert t2.of("create") == []                       # adopted, zero duplicates
+    probe = t2.of("find_by_marker")[0]
+    import re as _re
+    assert _re.fullmatch(r"[0-9a-f]{32}", probe[2])    # the probe used the TOKEN
+    rec = _mirrors(build)[k]
+    assert rec.status == "open" and rec.issue == 101
+
+
 # ═══ Review round 5 — P1: lifecycle-scoped marker + verified adoption (R10) ═══
 
 def test_marker_is_lifecycle_scoped():
+    import hashlib
     k = ("specs/a/spec.md", "derived_from", "docs:x")
+    tok1 = hashlib.sha256("API|specs/a/spec.md|derived_from|docs:x|1".encode()).hexdigest()[:32]
     m1 = ISS._marker("API", k, 1)
-    assert m1 == ("<!-- API-governance issues v1 "
-                  "key=specs/a/spec.md|derived_from|docs:x lifecycle=1 -->")
+    assert m1 == (f"<!-- API-governance issues v1 token={tok1} "
+                  f"key=specs/a/spec.md|derived_from|docs:x lifecycle=1 -->")
     m2 = ISS._marker("API", k, 2)
     assert m2 != m1 and "lifecycle=2" in m2
+    assert tok1 not in m2                                  # the token is lifecycle-scoped too
     # D5 refinement: determinism holds PER LIFECYCLE — same fact, same lifecycle,
     # same bytes
     assert ISS._marker("API", k, 1) == m1
@@ -1830,6 +2055,10 @@ def test_gh_transport_maps_failure_and_not_found(monkeypatch):
             returncode = 1
             stdout = ""
             stderr = "gh: Not Found (HTTP 404)"
+        # round 6 P1-1: IssueNotFound now requires the disambiguation probe to
+        # prove the repo reachable — the issue read 404s, the repo probe succeeds
+        if argv == g._argv_repo("o/r"):
+            R.returncode, R.stdout, R.stderr = 0, '{"id": 1}', ""
         return R()
 
     monkeypatch.setattr(ISS.subprocess, "run", fake_run)

@@ -91,7 +91,7 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
 - **Decision**: title `[{namespace}] Stale citation: {relation} {value} in {citing}`. Body is a
   fixed template rendering only fact fields: relation, value, citing file, cited artifact,
   pinned digest (abbreviated) + pin date, current digest (abbreviated), the repin remedy line,
-  and an HTML-comment marker `<!-- {namespace}-governance issues v1 key={citing}|{relation}|{value} -->`
+  and an HTML-comment marker `<!-- {namespace}-governance issues v1 token={token} key={citing}|{relation}|{value} lifecycle={n} -->` (the `token` is the fixed-length search token of round 6 P2; the lifecycle scoping is round 5 P1)
   for human forensics (the sidecar, not the marker, is the source of truth for dedup). No
   emission timestamps, no run ordering, nothing environmental (D5).
 - **Rationale**: byte-assertable in tests; updates render as meaningful diffs; the namespace
@@ -138,8 +138,11 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   and every other check's findings stay byte-identical), and `citations_fresh` emits one
   structurally-flagged indeterminate note per file — so `freshness_evaluated` goes False and
   every would-be resolve becomes the explicit preserve-skip. Blast radius is deliberately
-  WHOLE-RUN, consistent with this decision's per-run-coarse granularity. A file with no
-  front-matter block at all is NOT malformed: its citations are honestly absent.
+  WHOLE-RUN, consistent with this decision's per-run-coarse granularity. "Malformed" keys on
+  the OPENING delimiter, detected independently of the full-block regex (round 6 P1-2): a file
+  that opens `---` but never validly terminates the block — a lost or damaged closing
+  delimiter — is a parse failure too, not "no block". Only a file with no opening delimiter at
+  all is honestly absent; a mid-document `---` horizontal rule never triggers the signal.
 - **Rationale**: "no facts" has two meanings — CONFIRMED resolution vs NOT EVALUATED — and only
   the first may close a live issue. Without the signal, disabling the check (or a malformed pin
   file collapsing every pin to unpinned) made the planner resolve every open mirror — often
@@ -236,6 +239,24 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   page by default; an unpaginated read hid a just-posted marker behind page one and the retry
   re-posted the note. `has_comment_marker` now reads `--paginate --slurp` with `per_page=100`
   and flattens the page arrays — still one bounded, issue-scoped read.
+- **Round 6 P1-1 — a 404 is a deletion VERDICT only when the repository is reachable** (the
+  W36 doctrine at the tracker layer): GitHub deliberately 404s BOTH a deleted issue and a repo
+  the ambient credential cannot currently access, and treating every 404 as deletion spun up a
+  duplicate lifecycle once access returned. `GhTransport.get_state` disambiguates INSIDE the
+  transport (one shared fix point for every call site — live-mirror reality check, update,
+  resolve, create-recovery verification): on an issue 404 it makes ONE bounded probe of the
+  repository itself (`gh api repos/{repo}`) — repo reachable → genuine deletion →
+  `IssueNotFound` (deletion semantics proceed); repo unreachable → plain `EmissionError`
+  (exit 1, row untouched, retry when access returns). The probe runs only on the 404 path —
+  zero cost on healthy runs.
+- **Round 6 P2 — the SEARCH token is fixed-length**: a recovery marker embedding the full pin
+  key could exceed GitHub's search query limits for long citing paths/values — a 422 on every
+  recovery attempt would stick the row in `creating` forever. The marker now embeds a
+  32-hex-char token, `sha256(namespace|citing|relation|value|lifecycle)` truncated, and BOTH
+  recovery reads (repo-scoped search, issue-scoped comment scan) match on the token alone —
+  query length is bounded regardless of identity size. The human-readable identity stays in
+  the marker for forensics and in the body fields; determinism per (fact, lifecycle) holds
+  (D5 refinement).
 
 ## R11 — Resolution-detail classification via the current citation set (review round 3, P2-3)
 

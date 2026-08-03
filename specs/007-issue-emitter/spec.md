@@ -85,7 +85,7 @@ The tracker is unreachable, the operator's credential is missing, or the API rat
 - A human closes the issue while the fact is still stale: the dismissal is recorded, one continued-staleness comment is added, and the issue is never re-opened. Noticed at the
   next `--apply` even when the upstream never moves again: every live (`open`) mirror is
   reality-checked at apply time, not only rows being mutated.
-- The mirror record references an issue that no longer exists (deleted repo-side): detectable only at apply time (the offline plan cannot see the tracker); the apply report surfaces it explicitly — still-stale → a fresh issue is created (new lifecycle), resolved → record-only — never a crash.
+- The mirror record references an issue that no longer exists (deleted repo-side): detectable only at apply time (the offline plan cannot see the tracker); the apply report surfaces it explicitly — still-stale → a fresh issue is created (new lifecycle), resolved → record-only — never a crash. A tracker 404 is trusted as deletion only after a bounded probe proves the repository itself reachable; an inaccessible repository (credential/scope loss) is an emission failure (exit 1, row untouched) — never a deletion verdict, so no duplicate lifecycle when access returns.
 - The mirror record file is present-but-broken: typed load error, non-zero exit, no emission — never a guessed-empty state that would duplicate every issue (the pins `PinLoadError` precedent).
 - Two governed repos in one domain both opt in: each mirrors only its OWN staleness facts to its OWN configured tracker; the emitter never emits for a peer.
 - Config enables the emitter but names no tracker repository: config validation error at load time, before any planning.
@@ -102,7 +102,7 @@ The tracker is unreachable, the operator's credential is missing, or the API rat
 - A very long namespace/value/citing path would push the title past GitHub's 256-character
   limit: the title is hard-capped deterministically (fixed ellipsis); the full identity always
   lives in the body fields and the marker.
-- Freshness was NOT determinately evaluated this run (the `citations_fresh` check is disabled, the pin file is malformed, a citing file's front matter is malformed — its citations could not be harvested, an evaluation is indeterminate, or a citation fails resolution): the absence of a fact is “not evaluated”, never “confirmed resolved” — no mirror is resolved that run. Each preserved mirror surfaces as an explicit `skip (freshness not evaluated — mirror preserved)` plan row — never a silent omission, never a close: a disabled check must never look identical to a resolved world.
+- Freshness was NOT determinately evaluated this run (the `citations_fresh` check is disabled, the pin file is malformed, a citing file's front matter is malformed — unparseable, non-mapping, or opened-but-unterminated — so its citations could not be harvested, an evaluation is indeterminate, or a citation fails resolution): the absence of a fact is “not evaluated”, never “confirmed resolved” — no mirror is resolved that run. Each preserved mirror surfaces as an explicit `skip (freshness not evaluated — mirror preserved)` plan row — never a silent omission, never a close: a disabled check must never look identical to a resolved world.
 
 ## Requirements *(mandatory)*
 
