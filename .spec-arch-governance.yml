@@ -13,3 +13,4 @@ checks:
   namespace_valid: true
   adr_immutability: true
   governance_adopted: true
+  citations_fresh: true

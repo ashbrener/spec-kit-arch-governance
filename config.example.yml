@@ -38,6 +38,15 @@ checks:
   namespace_valid: true        # IDs are well-formed <PREFIX>-ADR-NNN, right prefix
   adr_immutability: true       # accepted ADR bodies unedited above '## Amendments' (vs git history)
   governance_adopted: true     # this repo's ADR README references governance_adr
+  citations_fresh: true        # PINNED citations still match the cited artifact's current content
+                               #   (slice 006). Self-gating: an unpinned citation is only ever an
+                               #   advisory nudge; only a determinate stale pin can fail/halt.
+
+# Freshness pins (slice 006) live in a separate per-repo sidecar `.spec-arch-pins.yml`:
+# generated, lockfile-like, TRACKED in git (its history is the audit trail of which upstream
+# states were accepted, and when). Written ONLY by `repin --apply` (dry-run is repin's default);
+# validate/gate/hooks/install/sync never create, update, or delete pins. Writer-internal format —
+# not part of the published reader contract (vocabulary.json stays 0.3.0).
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Standalone variant (one repo that is both source and build):
@@ -53,7 +62,8 @@ checks:
 #   sources: []                 # none — citations are intra-repo
 #   citation_keys: { source_specs: derived_from, adrs: cites }
 #   checks: { citations_resolve: true, citations_current: true,
-#            namespace_valid: true, adr_immutability: true, governance_adopted: true }
+#            namespace_valid: true, adr_immutability: true, governance_adopted: true,
+#            citations_fresh: true }
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # The DOMAIN MANIFEST (`.spec-arch-domain.yml`) — multi-repo only.
