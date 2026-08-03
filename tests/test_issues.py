@@ -976,11 +976,98 @@ def test_mirror_file_roundtrips_intent_statuses(tmp_path):
 
 def test_gh_transport_recovery_read_commands():
     g = ISS.GhTransport()
-    argv = g._argv_find_by_marker("o/r", "<!-- m -->")
-    assert argv[:2] == ["gh", "api"] and "search/issues" in argv
-    assert any("repo:o/r" in a and "<!-- m -->" in a for a in argv)
-    argv = g._argv_list_comments("o/r", 7)
-    assert argv[:2] == ["gh", "api"] and "repos/o/r/issues/7/comments" in argv
+    assert g._argv_find_by_marker("o/r", "<!-- m -->") == [
+        "gh", "api", "-X", "GET", "search/issues",
+        "-f", 'q=repo:o/r in:body "<!-- m -->"']
+    assert g._argv_list_comments("o/r", 7) == [
+        "gh", "api", "repos/o/r/issues/7/comments"]
+
+
+# ═══ Review round 4 — P1: the production transport implements the FULL protocol ═══
+
+def test_gh_transport_satisfies_the_full_transport_protocol():
+    """Round 4 P1: the fake satisfying the protocol is not evidence the production
+    twin does — GhTransport shipped without the R10 recovery reads while every test
+    injected the fake. Structural conformance: every protocol member must exist as a
+    real implementation on BOTH transports, so a protocol method the production
+    class lacks fails the suite the moment the protocol grows."""
+    members = [n for n in dir(ISS.IssueTransport)
+               if not n.startswith("_") and callable(getattr(ISS.IssueTransport, n))]
+    assert set(members) >= {"get_state", "create", "update_body", "comment", "close",
+                            "find_by_marker", "has_comment_marker"}
+    for cls in (ISS.GhTransport, FakeTransport):
+        for name in members:
+            impl = getattr(cls, name, None)
+            assert callable(impl), f"{cls.__name__} is missing {name}()"
+            assert getattr(impl, "__isabstractmethod__", False) is False
+    # and the runtime-checkable protocol agrees, instance-level
+    assert isinstance(ISS.GhTransport(), ISS.IssueTransport)
+    assert isinstance(FakeTransport(), ISS.IssueTransport)
+
+
+def test_gh_transport_find_by_marker_parses_search_results(monkeypatch):
+    g = ISS.GhTransport()
+    marker = "<!-- API-governance issues v1 key=a|cites|X -->"
+    ran = []
+
+    def fake_run(argv):
+        ran.append(argv)
+        return ('{"total_count": 2, "items": ['
+                '{"number": 5, "body": "unrelated"},'
+                f'{{"number": 7, "body": "text {marker} tail"}}]}}')
+
+    monkeypatch.setattr(g, "_run", fake_run)
+    assert g.find_by_marker("o/r", marker) == 7            # marker matched in the body
+    assert ran == [g._argv_find_by_marker("o/r", marker)]
+    monkeypatch.setattr(g, "_run", lambda argv: '{"total_count": 0, "items": []}')
+    assert g.find_by_marker("o/r", marker) is None         # nothing found
+    monkeypatch.setattr(
+        g, "_run",
+        lambda argv: '{"total_count": 1, "items": [{"number": 5, "body": "no match"}]}')
+    assert g.find_by_marker("o/r", marker) is None         # near-miss is not a match
+    monkeypatch.setattr(g, "_run", lambda argv: '{"unexpected": true}')
+    with pytest.raises(ISS.EmissionError):
+        g.find_by_marker("o/r", marker)                    # shape violation is typed
+
+
+def test_gh_transport_has_comment_marker_parses_comment_list(monkeypatch):
+    g = ISS.GhTransport()
+    marker = "<!-- API-governance issues v1 key=a|cites|X -->"
+    ran = []
+
+    def fake_run(argv):
+        ran.append(argv)
+        return f'[{{"body": "first"}}, {{"body": "note {marker}"}}]'
+
+    monkeypatch.setattr(g, "_run", fake_run)
+    assert g.has_comment_marker("o/r", 7, marker) is True
+    assert ran == [g._argv_list_comments("o/r", 7)]
+    monkeypatch.setattr(g, "_run", lambda argv: '[{"body": "unrelated"}]')
+    assert g.has_comment_marker("o/r", 7, marker) is False
+    monkeypatch.setattr(g, "_run", lambda argv: '[]')
+    assert g.has_comment_marker("o/r", 7, marker) is False
+    monkeypatch.setattr(g, "_run", lambda argv: '{"not": "a list"}')
+    with pytest.raises(ISS.EmissionError):
+        g.has_comment_marker("o/r", 7, marker)             # shape violation is typed
+
+
+def test_gh_transport_recovery_reads_map_failures_to_emission_error(monkeypatch):
+    g = ISS.GhTransport()
+
+    def failing_run(argv, capture_output, text):
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = "gh: API rate limit exceeded"
+        return R()
+
+    monkeypatch.setattr(ISS.subprocess, "run", failing_run)
+    with pytest.raises(ISS.EmissionError) as e1:
+        g.find_by_marker("o/r", "<!-- m -->")
+    assert "rate limit" in str(e1.value)
+    with pytest.raises(ISS.EmissionError) as e2:
+        g.has_comment_marker("o/r", 7, "<!-- m -->")
+    assert "rate limit" in str(e2.value)
 
 
 # ═══ Review round 3 — P2-3: resolution detail via the current citation set ═══

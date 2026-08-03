@@ -207,6 +207,12 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   index-lag a just-created issue. A probe that false-misses re-creates — the pre-R10 behavior,
   now confined to the crash+immediate-retry+index-lag corner. The adopt path records the found
   number verbatim; a fact that moved since the intent updates on the next run.
+- **Lesson (review round 4, P1)**: the fake satisfying the protocol is not evidence the
+  production twin does — `GhTransport` shipped without the recovery reads while every test
+  injected `FakeTransport`. Conformance is now asserted STRUCTURALLY: the protocol is
+  runtime-checkable and a test requires every protocol member to exist as a real
+  implementation on BOTH transports, so a protocol method the production class lacks fails
+  the suite the moment the protocol grows.
 
 ## R11 — Resolution-detail classification via the current citation set (review round 3, P2-3)
 

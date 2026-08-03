@@ -36,7 +36,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Optional, Protocol
+from typing import Optional, Protocol, runtime_checkable
 
 import yaml
 
@@ -511,9 +511,14 @@ class IssueNotFound(EmissionError):
     lifecycle / record-only), surfaced in the report, never a crash (spec edge case)."""
 
 
+@runtime_checkable
 class IssueTransport(Protocol):
     """The one narrow seam every network effect lives behind (R1). Tests inject a
-    recording fake; production shells out to the operator's ambient-credentialed `gh`."""
+    recording fake; production shells out to the operator's ambient-credentialed `gh`.
+
+    Runtime-checkable (round 4 P1): conformance of the PRODUCTION transport is
+    asserted structurally in the tests — the fake satisfying the protocol is not
+    evidence the production twin does."""
 
     def get_state(self, repo: str, number: int) -> str: ...   # "open" | "closed"
     def create(self, repo: str, title: str, body: str, labels: list[str]) -> int: ...
@@ -614,6 +619,33 @@ class GhTransport:
 
     def close(self, repo: str, number: int) -> None:
         self._run(self._argv_close(repo, number))
+
+    # the R10 bounded recovery reads — one call per interrupted row, apply-time only
+
+    def find_by_marker(self, repo: str, marker: str) -> Optional[int]:
+        data = self._json(self._run(self._argv_find_by_marker(repo, marker)))
+        items = data.get("items")
+        if not isinstance(items, list):
+            raise EmissionError(f"`gh api` search returned no items list for {repo}")
+        for item in items:
+            if not isinstance(item, dict) or marker not in str(item.get("body") or ""):
+                continue                    # search can over-match; the marker decides
+            number = item.get("number")
+            if isinstance(number, int) and not isinstance(number, bool):
+                return number
+        return None
+
+    def has_comment_marker(self, repo: str, number: int, marker: str) -> bool:
+        out = self._run(self._argv_list_comments(repo, number))
+        try:
+            data = json.loads(out)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise EmissionError(f"`gh api` returned unparseable JSON: {exc}") from exc
+        if not isinstance(data, list):
+            raise EmissionError(f"`gh api` comments returned {type(data).__name__}, "
+                                f"expected a list")
+        return any(isinstance(c, dict) and marker in str(c.get("body") or "")
+                   for c in data)
 
 
 # ──────────────────────────── the apply loop (FR-009/FR-011) ────────────────────────────
