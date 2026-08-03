@@ -42,8 +42,8 @@ of `.spec-arch-issues.yml`. Enforcement (gate, flip guard) needs zero changes.
 
 ## Phase 4: US2 — idempotency, never duplicate (P2)
 
-- [ ] T011 [US2] Write failing tests: fact + `open` mirror with unchanged digests → up-to-date (re-run creates nothing, sidecar byte-identical); fact + `open` mirror with moved current digest → update row → `update_body` on the SAME issue number, digests refreshed, no create; two facts in one citing file (different relation/value) → two distinct rows/issues (per-fact identity); `resolved` mirror + fact stale AGAIN → create (new lifecycle, new issue number, record returns to `open`).
-- [ ] T012 [US2] Extend `issues_plan` + apply loop for update/up-to-date dispositions and the resolved-restale lifecycle. Make T011 pass.
+- [X] T011 [US2] Write failing tests: fact + `open` mirror with unchanged digests → up-to-date (re-run creates nothing, sidecar byte-identical); fact + `open` mirror with moved current digest → update row → `update_body` on the SAME issue number, digests refreshed, no create; two facts in one citing file (different relation/value) → two distinct rows/issues (per-fact identity); `resolved` mirror + fact stale AGAIN → create (new lifecycle, new issue number, record returns to `open`).
+- [X] T012 [US2] Extend `issues_plan` + apply loop for update/up-to-date dispositions and the resolved-restale lifecycle. Make T011 pass.
 
 ## Phase 5: US3 — resolution reflected, dismissal respected (P3)
 

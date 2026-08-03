@@ -465,6 +465,105 @@ def test_apply_up_to_date_rows_touch_nothing(tmp_path):
     assert (build / ISS.MIRROR_FILE).read_bytes() == before        # byte-identical (SC-002)
 
 
+# ═══ Phase 4 — US2: idempotency, never duplicate (T011/T012) ═══
+
+def test_rerun_with_unchanged_facts_creates_nothing_sidecar_byte_identical(tmp_path):
+    _, build, cfg, root, facts = _stale_pair(tmp_path)
+    _apply(build, cfg, root, facts, FakeTransport())
+    before = (build / ISS.MIRROR_FILE).read_bytes()
+    t = FakeTransport()
+    rows, report, mutated = _apply(build, cfg, root, facts, t)
+    assert {r.disposition for r in rows} == {"up-to-date"}
+    assert t.calls == [] and not mutated                   # 0 new issues, 0 mutations (SC-002)
+    assert (build / ISS.MIRROR_FILE).read_bytes() == before
+
+
+def test_second_movement_updates_the_same_issue_never_a_second(tmp_path):
+    src, build, cfg, root, facts = _stale_pair(tmp_path)
+    _apply(build, cfg, root, facts, FakeTransport())
+    first = _mirrors(build)
+    # upstream moves AGAIN — same fact identity, new content state
+    (src / "specs" / "005-fund-model" / "spec.md").write_text(
+        UPSTREAM_SPEC.replace("v1", "v3"))
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts2 = ISS.staleness_facts(issues)
+    t = FakeTransport()
+    for n, rec in [(r.issue, r) for r in first.values()]:
+        t.states[n] = "open"
+    rows, report, _ = _apply(build, cfg, root, facts2, t)
+    k = ("specs/001-derived/spec.md", "derived_from", "docs:005-fund-model")
+    by_key = {r.key: r for r in rows}
+    assert by_key[k].disposition == "update"
+    assert t.of("create") == []                            # never a second issue
+    updates = t.of("update_body")
+    assert len(updates) == 1 and updates[0][2] == first[k].issue   # the SAME issue number
+    after = _mirrors(build)
+    assert after[k].issue == first[k].issue
+    assert after[k].current_digest == P.digest_path(
+        src / "specs" / "005-fund-model" / "spec.md")      # digests refreshed
+    assert after[k].current_digest != first[k].current_digest
+    assert any("updated" in ln for ln in report)
+
+
+def test_two_facts_in_one_citing_file_get_distinct_issues(tmp_path):
+    src, build = _domain(tmp_path)
+    # a second upstream feature, cited from the SAME citing file (spec.md)
+    (src / "specs" / "006-ledger").mkdir(parents=True)
+    (src / "specs" / "006-ledger" / "spec.md").write_text(
+        "---\nderived_from: []\n---\n# Ledger spec\nLedger requirement, v1.\n")
+    (build / "specs" / "001-derived" / "spec.md").write_text(
+        "---\nderived_from:\n  - docs:005-fund-model\n  - docs:006-ledger\n---\n# Derived spec\n")
+    _pin(build)
+    _go_stale(src)
+    (src / "specs" / "006-ledger" / "spec.md").write_text(
+        "---\nderived_from: []\n---\n# Ledger spec\nLedger requirement, v2.\n")
+    _enable(build)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    assert len(facts) == 2
+    assert len({f.citing for f in facts}) == 1             # same citing file
+    assert len({f.key for f in facts}) == 2                # distinct per-fact identity
+    t = FakeTransport()
+    _apply(build, cfg, root, facts, t)
+    assert len(t.of("create")) == 2
+    mirrors = _mirrors(build)
+    assert len({r.issue for r in mirrors.values()}) == 2   # two distinct issues
+
+
+def test_resolved_mirror_going_stale_again_is_a_new_lifecycle(tmp_path):
+    src, build, cfg, root, facts = _stale_pair(tmp_path)
+    t = FakeTransport()
+    _apply(build, cfg, root, facts, t)
+    # both facts resolve (repin accepts upstream)...
+    assert R.main([str(build), "--apply"]) == 0
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    _apply(build, cfg, root, ISS.staleness_facts(issues), t)
+    mirrors = _mirrors(build)
+    assert {r.status for r in mirrors.values()} == {"resolved"}
+    old_numbers = {r.key: r.issue for r in mirrors.values()}
+    # ...then the SAME pin key goes stale again
+    (src / "specs" / "005-fund-model" / "spec.md").write_text(
+        UPSTREAM_SPEC.replace("v1", "v4"))
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts3 = ISS.staleness_facts(issues)
+    assert len(facts3) == 1
+    rows = ISS.issues_plan(facts3, _mirrors(build), P.load_pins(root))
+    by_key = {r.key: r for r in rows}
+    k = facts3[0].key
+    assert by_key[k].disposition == "create"               # new lifecycle, not update
+    assert "new lifecycle" in by_key[k].detail
+    t2 = FakeTransport()
+    t2.next_number = 900
+    _apply(build, cfg, root, facts3, t2)
+    rec = _mirrors(build)[k]
+    assert rec.status == "open" and rec.issue == 900       # back to open, NEW number
+    assert rec.issue != old_numbers[k]
+
+
 # ═══ Phase 3 — US1: GhTransport asserted on command construction ONLY (T009) ═══
 
 def test_gh_transport_builds_gh_api_commands():
