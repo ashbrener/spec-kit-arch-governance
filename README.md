@@ -95,6 +95,26 @@ The five original checks test *existence* and *status*; none can see a cited art
   prune), and `repin --apply` is the **only** writer of pins — the pin file’s git history is the
   audit trail of which upstream state was accepted, and when.
 
+### Visibility — the issues mirror (opt-in, slice 007)
+
+Detection only reaches whoever runs validate. For teams that triage in GitHub issues, the
+**optional, default-disabled** `issues` verb mirrors validated staleness facts — the determinate
+`citations_fresh` failures from the same single engine — into GitHub issues:
+
+- **Opt-in, explicit**: an `issues:` config section (`enabled: true` + `repository: owner/name`).
+  Without it, every verb is byte-identical to pre-007 and nothing performs network access.
+- **One issue per fact** (identity = the pin key), idempotent: re-runs never duplicate; a second
+  upstream movement updates the *same* issue; a repin closes it with an audit comment naming the
+  new pin state; an issue a human closed while still stale is respected — one note, recorded as
+  dismissed, never re-opened. The emitter never deletes an issue.
+- **Dry-run by default, fully offline** — the plan diffs facts against the tracked sidecar
+  `.spec-arch-issues.yml` (written only by `issues --apply`; its git history is the emission
+  audit trail). `--apply` is the only networked mode, via your ambient `gh` credential.
+- **Never enforcement**: the verb runs in no lifecycle hook, and its failures (missing
+  credential, rate limit, unreachable tracker) fail only its own run — validate and gate are
+  untouched by construction. CI pattern: `validate` then `issues --apply` as separate steps
+  (the not-enabled no-op makes the second step safe unconditionally).
+
 ---
 
 ## Install
@@ -176,6 +196,7 @@ Cross-repo citations use the fully-qualified form (`CORE-ADR-007`); a bare `ADR-
 | `speckit.arch-governance.install` | once per repo | interview → config, scaffold ADR, born-compliant templates (never writes pins — it prints the `repin --apply` command) |
 | `speckit.arch-governance.sync` | on demand | reconcile a repo against the domain manifest — **dry-run by default** |
 | `speckit.arch-governance.repin` | on demand, after reviewing upstream changes | reconcile watermark pins against upstream content — **dry-run by default**; `--apply` writes only this repo’s `.spec-arch-pins.yml` (the only pin writer) |
+| `speckit.arch-governance.issues` | on demand / CI, **never a hook** | mirror validated staleness facts into GitHub issues (opt-in, default-disabled) — **dry-run by default, fully offline**; `--apply` emits via your ambient `gh` credential and writes only this repo’s `.spec-arch-issues.yml` |
 
 | Hook | Command | Effect (advisory default) |
 |---|---|---|

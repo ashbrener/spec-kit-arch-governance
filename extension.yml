@@ -23,7 +23,11 @@ extension:
   # 1.1.0 — citations_fresh (slice 006): watermark pins close the reverse-propagation gap —
   # a sixth read-only check surfaces upstream content movement on pinned citations, and the
   # new `repin` verb (dry-run default) is the one and only writer of the pin sidecar.
-  version: "1.1.0"
+  # 1.2.0 — issues (slice 007, additive): an OPTIONAL, default-disabled emitter mirrors
+  # validated staleness facts (determinate citations_fresh failures from the one engine)
+  # into GitHub issues. Explicit verb only — never a hook; dry-run default, fully offline;
+  # --apply is the single networked mode (the operator's ambient `gh` credential).
+  version: "1.2.0"
   description: "Keep specs, code & ADRs in sync — born-compliant citation slots + a read-only fail-closed validator on every spec and plan."
   author: "Ash Brener"
   repository: "https://github.com/ashbrener/spec-kit-arch-governance"
@@ -71,6 +75,16 @@ provides:
     - name: "speckit.arch-governance.repin"
       file: "commands/repin.md"
       description: "Reconcile watermark pins against upstream content: a per-citation plan (create/refresh/prune), dry-run by default; --apply writes only this repo's pin file."
+
+    # The issues mirror (slice 007) — OPTIONAL, default-disabled. Mirrors validated
+    # staleness facts (determinate citations_fresh failures) into GitHub issues.
+    # Explicit verb ONLY — deliberately registered in no lifecycle hook: the emitter
+    # can fail without touching enforcement (validate/gate are byte-identical with
+    # or without it). Dry-run by default (fully offline); --apply is the one
+    # networked mode, via the operator's ambient `gh` credential.
+    - name: "speckit.arch-governance.issues"
+      file: "commands/issues.md"
+      description: "Mirror validated staleness facts into GitHub issues (opt-in, default-disabled). Dry-run by default; --apply emits and writes only this repo's .spec-arch-issues.yml. Never runs in a hook."
 
   # Informational: the per-repo config the install ceremony writes. The CLI does
   # not auto-copy this; `speckit.arch-governance.install` creates it from the

@@ -10,3 +10,5 @@
 /HANDOFF.md     export-ignore
 # This repo's own dogfood pin state (its entries reference the excluded /specs history).
 /.spec-arch-pins.yml  export-ignore
+# This repo's own issue-mirror state (slice 007) — same dogfood reasoning as the pins.
+/.spec-arch-issues.yml  export-ignore

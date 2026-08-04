@@ -48,6 +48,23 @@ checks:
 # validate/gate/hooks/install/sync never create, update, or delete pins. Writer-internal format —
 # not part of the published reader contract (vocabulary.json stays 0.3.0).
 
+# The issues mirror (slice 007) — OPTIONAL, default-disabled. When enabled, the explicit
+# `issues` verb mirrors validated staleness facts (determinate citations_fresh failures from
+# the one validate engine) into GitHub issues: one issue per fact (identity = the pin key),
+# idempotent re-runs, resolution closed with an audit comment, a human closure respected
+# (noted once, never re-opened). EMITTER ONLY: it never runs inside validate/gate/any hook,
+# and its failures never touch enforcement. Dry-run is the default and fully offline (the
+# plan diffs facts against the tracked sidecar `.spec-arch-issues.yml` — written only by
+# `issues --apply`); --apply is the single networked mode, via the operator's ambient `gh`
+# credential (the repo never stores or receives a secret). Absent section ≡ disabled —
+# every existing verb stays byte-identical and nothing performs network access.
+#
+# issues:
+#   enabled: true                # default false; enabling REQUIRES `repository`
+#   repository: acme/widgets     # the GitHub repo the issues go to (owner/name — explicit,
+#                                #   never inferred from git remotes)
+#   labels: [staleness]          # optional; applied at issue creation only, never identity
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Standalone variant (one repo that is both source and build):
 #

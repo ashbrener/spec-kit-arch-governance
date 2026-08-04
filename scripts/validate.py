@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -67,16 +67,46 @@ class Issue:
     detail: str
     where: str = ""
     severity: str = "fail"   # fail | note
+    # Slice 007 (D1): the machine face of a determinate citations_fresh staleness
+    # finding — an issues.StalenessFact, attached ONLY by the stale-pin branch of
+    # check_citations_fresh. Default None keeps every existing constructor and
+    # consumer (report, gate, flip guard) byte-identical; only the issues emitter
+    # reads it. Typed loosely to avoid a module import cycle (issues imports us).
+    fact: object = None
+    # Slice 007 review R8: True on the citations_fresh notes that mean "freshness
+    # could NOT be determinately evaluated" (malformed pin file, indeterminate
+    # skips) — a STRUCTURAL signal, never matched by prose. The emitter uses it to
+    # distinguish confirmed resolution from not-evaluated; unpinned nudges and
+    # orphaned-pin notes stay False (benign — they impair nothing). Additive,
+    # default False: every existing constructor and consumer is byte-identical.
+    indeterminate: bool = False
 
     def render(self) -> str:
         loc = f"  ({self.where})" if self.where else ""
         return f"  [{self.check}] {self.detail}{loc}"
 
 
+@dataclass
+class ValidationExtras:
+    """Side-channel outputs of a validate run that are NOT findings (slice 007,
+    round 7 P2-3). Consumed only by the issues emitter; default-None callers get
+    byte-identical reports (FR-001/SC-001) — nothing here ever becomes an Issue.
+
+    `malformed_sources`: citing files whose front-matter block exists but does not
+    parse (R8's harvest layer) — their citations could not be HARVESTED, so the
+    emitter treats the run as not determinately evaluated and preserves mirrors.
+    """
+
+    malformed_sources: list[str] = field(default_factory=list)
+
+
 # ──────────────────────────── parsing ────────────────────────────
 
+_FM_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.S)
+
+
 def split_front_matter(text: str):
-    m = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", text, re.S)
+    m = _FM_RE.match(text)
     if m:
         try:
             fm = yaml.safe_load(m.group(1)) or {}
@@ -84,6 +114,49 @@ def split_front_matter(text: str):
             fm = {}
         return (fm if isinstance(fm, dict) else {}), m.group(2)
     return {}, text
+
+
+# The OPENING front-matter delimiter alone — same position rule as _FM_RE (start of
+# file). Detected independently of the full block (round 6 P1-2): a file that OPENS
+# a front-matter block but never validly terminates it must read as MALFORMED, not
+# as "no block" — otherwise a damaged closing delimiter silently counts the run as
+# determinately evaluated.
+_FM_OPEN_RE = re.compile(r"^---\s*\n")
+
+# Canonical EMPTY front matter (round 11 P2): an immediate closing delimiter —
+# `---\n---\n…` — is VALID zero-body front matter, not an unterminated block. It
+# yields no citations (honestly absent, evaluation unimpaired). _FM_RE cannot match
+# a zero-body block (it requires a body line), so without this short-circuit the
+# round-6 opened-but-unterminated detector false-positived on it — the harvest
+# see-saw's false-positive twin: every tightening for a false negative must be
+# re-checked against the valid-input floor. `\s*` mirrors _FM_RE's own delimiter
+# tolerance (which already admits CRLF for non-empty blocks) — the same floor, no
+# broader line-ending support invented here.
+_FM_EMPTY_RE = re.compile(r"^---\s*\n---\s*(?:\n|$)")
+
+
+def front_matter_malformed(text: str) -> bool:
+    """A front-matter block was OPENED but does not parse to a mapping (slice 007
+    R8's harvest layer): a PARSE FAILURE of the citation source is 'cannot
+    evaluate', never 'citations absent'. Covers an unterminated/damaged-closer
+    block (opening delimiter present, full-block regex not matching — round 6
+    P1-2) as well as unparseable/non-mapping YAML inside a well-formed block. A
+    file with no OPENING delimiter at all is NOT malformed — its citations are
+    honestly absent (a mid-document `---` horizontal rule never triggers this).
+    Side-channel only: this never changes what split_front_matter returns or any
+    check's existing findings."""
+    if not _FM_OPEN_RE.match(text):
+        return False
+    if _FM_EMPTY_RE.match(text):
+        return False            # canonical EMPTY front matter — valid, zero citations
+    m = _FM_RE.match(text)
+    if not m:
+        return True             # opened, never (validly) terminated
+    try:
+        fm = yaml.safe_load(m.group(1))
+    except yaml.YAMLError:
+        return True
+    return fm is not None and not isinstance(fm, dict)
 
 
 def parse_status(fm: dict, body: str) -> str:
@@ -160,17 +233,29 @@ def scan_adrs(repo_root: Path, adr_dir: str, namespace: str = "") -> list[Adr]:
     return out
 
 
-def scan_citations(repo_root: Path, specs_dir: str, keys: CitationKeys, namespace: str = "") -> list[Citation]:
+def scan_citations(repo_root: Path, specs_dir: str, keys: CitationKeys, namespace: str = "",
+                   malformed: list | None = None) -> list[Citation]:
+    """Harvest citations. `malformed` (slice 007 R8, optional SIDE-CHANNEL): when a
+    list is passed, the relpath of every citing file whose front matter is present
+    but unparseable is appended — the harvested citation list itself is unchanged
+    (a malformed file yields no citations, exactly as before), so every existing
+    caller and check keeps byte-identical findings."""
     cits: list[Citation] = []
     d = repo_root / specs_dir
     if not d.is_dir():
         return cits
     for p in sorted(d.rglob("spec.md")):
-        fm, _ = split_front_matter(p.read_text(encoding="utf-8", errors="replace"))
+        text = p.read_text(encoding="utf-8", errors="replace")
+        if malformed is not None and front_matter_malformed(text):
+            malformed.append(str(p.relative_to(repo_root)))
+        fm, _ = split_front_matter(text)
         for v in _as_list(fm.get(keys.source_specs)):
             cits.append(Citation("derived_from", v, str(p.relative_to(repo_root))))
     for p in sorted(d.rglob("plan.md")):
-        fm, _ = split_front_matter(p.read_text(encoding="utf-8", errors="replace"))
+        text = p.read_text(encoding="utf-8", errors="replace")
+        if malformed is not None and front_matter_malformed(text):
+            malformed.append(str(p.relative_to(repo_root)))
+        fm, _ = split_front_matter(text)
         for v in _as_list(fm.get(keys.adrs)):
             # a bare `cites: ADR-NNN` is an intra-repo reference → qualify with this repo's
             # namespace; cross-repo references must already be fully qualified (FR-005).
@@ -347,6 +432,11 @@ def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_inde
     cannot-evaluate → indeterminate note (FR-008). A citation already failing
     `citations_resolve` stays silent here — the resolve failure owns its story (FR-009);
     if that check is disabled, nobody owns it, so it degrades to an indeterminate note.
+
+    Malformed-front-matter citing files are NOT reported here (round 7 P2-3): that
+    signal travels through `ValidationExtras.malformed_sources` — outside the
+    findings list — so a repo that never opted into the emitter keeps byte-identical
+    reports (FR-001/SC-001).
     """
     out: list[Issue] = []
     try:
@@ -355,7 +445,7 @@ def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_inde
         out.append(Issue("citations_fresh",
                          f"pin file {P.PIN_FILE} could not be parsed ({exc}) — "
                          f"treating all citations as unpinned for this run",
-                         P.PIN_FILE, severity="note"))
+                         P.PIN_FILE, severity="note", indeterminate=True))
         pins = {}
     keys_seen: set[P.PinKey] = set()
     for c in cits:
@@ -371,7 +461,7 @@ def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_inde
                 out.append(Issue("citations_fresh",
                                  f"{c.relation} {c.raw!r}: freshness indeterminate — the citation does "
                                  f"not resolve (and citations_resolve is disabled)",
-                                 c.source, severity="note"))
+                                 c.source, severity="note", indeterminate=True))
             continue  # FR-009: the citations_resolve failure owns this citation's story
         pin = pins.get(k)
         if pin is None:
@@ -383,12 +473,21 @@ def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_inde
         if t.status != "ok":
             out.append(Issue("citations_fresh",
                              f"{c.relation} {c.raw!r}: freshness indeterminate — {t.reason}",
-                             c.source, severity="note"))
+                             c.source, severity="note", indeterminate=True))
         elif t.digest != pin.digest:
+            # Slice 007 (D1/R2): the ONE fact-attachment site. The structured fact rides
+            # the same Issue the enforcement path already consumes — one engine, two
+            # consumers — so the fact set and the finding set can never diverge. The
+            # import is deferred (issues.py imports this module at its top level).
+            from issues import StalenessFact
             out.append(Issue("citations_fresh",
                              f"{c.relation} {c.raw!r} is STALE — {t.display} changed since it was "
                              f"pinned (pinned {P.abbrev(pin.digest)}, current {P.abbrev(t.digest)}); "
-                             f"review the upstream change, then `repin`", c.source))
+                             f"review the upstream change, then `repin`", c.source,
+                             fact=StalenessFact(relation=c.relation, value=c.raw,
+                                                citing=c.source, cited_display=t.display,
+                                                pinned_digest=pin.digest, pinned_date=pin.pinned,
+                                                current_digest=t.digest)))
     for k in sorted(pins):
         if k not in keys_seen:
             pin = pins[k]
@@ -426,9 +525,11 @@ def coverage_report(cfg: GovernanceConfig, repo_root: Path) -> list[Issue]:
     return out
 
 
-def validate(cfg: GovernanceConfig, repo_root: Path):
+def validate(cfg: GovernanceConfig, repo_root: Path, extras: ValidationExtras | None = None):
     this_adrs, adr_index, spec_index = build_indexes(cfg, repo_root)
-    cits = scan_citations(repo_root, cfg.specs_dir, cfg.citation_keys, cfg.namespace)
+    malformed_sources: list[str] = []
+    cits = scan_citations(repo_root, cfg.specs_dir, cfg.citation_keys, cfg.namespace,
+                          malformed_sources)
     runners = {
         "namespace_valid": lambda: check_namespace_valid(this_adrs, cfg.namespace),
         "citations_resolve": lambda: check_citations_resolve(cits, adr_index, spec_index),
@@ -442,6 +543,11 @@ def validate(cfg: GovernanceConfig, repo_root: Path):
         if getattr(cfg.checks, name):
             issues.extend(fn())
     issues.extend(coverage_report(cfg, repo_root))   # advisory notes; never fail (see coverage_report)
+    if extras is not None:
+        # round 7 P2-3: the harvest-failure signal travels OUTSIDE the findings —
+        # only an emitter that passed a container ever sees it; every other caller
+        # gets byte-identical output (FR-001/SC-001).
+        extras.malformed_sources = malformed_sources
     return issues, {"adrs": len(this_adrs), "citations": len(cits)}
 
 

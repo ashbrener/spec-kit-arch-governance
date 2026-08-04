@@ -99,6 +99,27 @@ A read-only validator (`validate` command + CI), per the config's checks:
 
 Output: `PASS` / `ADVISORY (n issues — not blocking)` / `FAIL (n issues)` depending on `mode`. Never mutates.
 
+### The issues mirror (slice 007) — one engine, two consumers
+
+The validate engine has exactly two consumers: **enforcement** (the gate + the blocking-flip
+guard consume its failure-severity issues) and **visibility** (the optional `issues` emitter
+mirrors its determinate `citations_fresh` failures into GitHub issues). The emitter is a
+*sibling* consumer, never a participant: the stale-pin branch attaches a structured
+`StalenessFact` to the finding it already emits (additive, default-`None`), so the fact set and
+the finding set can never diverge — no second detection path, no re-derived severity ladder.
+Three seams keep it honest:
+
+- **An offline plan** — the dry-run default diffs current facts against the tracked mirror
+  sidecar `.spec-arch-issues.yml` (identity = the pin key; written only by `issues --apply`,
+  atomically after each successful emission — a partial apply records exactly the rows that
+  succeeded, so a re-run resumes idempotently). Knowing "what exists" never needs the tracker.
+- **A transport seam** — every network effect lives behind the narrow `IssueTransport` protocol;
+  production shells out to the operator's ambient-credentialed `gh` CLI (the repo never holds a
+  secret), and every test injects a recording fake — no test touches the network.
+- **No hook, ever** — the verb is explicitly absent from the lifecycle hooks, so a tracker
+  outage, rate limit, or missing credential can fail only the emitter's own run; validate and
+  gate are byte-identical with the mirror enabled, disabled, or mid-failure.
+
 ## 8. Synchronizes with SpecKit
 
 The extension registers lifecycle hooks against the discovered topology:
