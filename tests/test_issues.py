@@ -162,6 +162,12 @@ class FakeTransport:
 
     def has_comment_marker(self, repo, number, marker):
         self._record("has_comment_marker", repo, number, marker)
+        if not self.repo_accessible:
+            raise ISS.EmissionError(
+                f"repository {repo} is not accessible — cannot list comments")
+        if self.states.get(number) == "missing":
+            # round 12: listing comments of a DELETED issue 404s tracker-side
+            raise ISS.IssueNotFound(f"issue #{number} was deleted in {repo}")
         bodies = self.seeded_comments.get(number, []) + self.posted.get(number, [])
         return any(marker in b for b in bodies)
 
@@ -1798,6 +1804,120 @@ def test_horizontal_rule_without_front_matter_stays_absent(tmp_path):
     cfg, root, issues, extras = _validated_with_extras(build)
     assert extras.malformed_sources == []
     assert ISS.freshness_evaluated(cfg, issues, extras)   # never over-triggers
+
+
+# ═══ Review round 12 — P2: a deleted issue under a pending dismissal never loops ═══
+# After a `dismissing` intent persists, a tracker-side deletion made every apply's
+# has_comment_marker raise IssueNotFound uncaught — the record looped in
+# `dismissing` forever. Deletion is a STRONGER operator act than closure: the
+# closure (and the pending note) died with the issue.
+
+def _dismissing_intent(tmp, monkeypatch):
+    """Drive to `dismissing` (note posted, confirm write failed). Returns
+    (src, build, k): record status dismissing, issue #101, lifecycle 1."""
+    src, build, k = _mirrored_stale(tmp)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    real = ISS.write_mirrors
+    n = {"count": 0}
+
+    def flaky(root_, records):
+        n["count"] += 1
+        if n["count"] == 2:                            # 1: dismissing intent, 2: confirm
+            raise OSError("disk full")
+        return real(root_, records)
+
+    monkeypatch.setattr(ISS, "write_mirrors", flaky)
+    t1 = FakeTransport()
+    t1.states[101] = "closed"
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t1)
+    monkeypatch.setattr(ISS, "write_mirrors", real)
+    assert ISS.load_mirrors(build)[k].status == "dismissing"
+    return src, build, k
+
+
+def test_dismissing_issue_deleted_still_stale_starts_new_lifecycle(tmp_path, monkeypatch):
+    src, build, k = _dismissing_intent(tmp_path, monkeypatch)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    assert len(facts) == 1                             # still stale — needs a live mirror
+    t2 = FakeTransport()
+    t2.states[101] = "missing"                         # the issue was DELETED
+    t2.next_number = 700
+    rows, report, _ = _apply(build, cfg, root, facts, t2)
+    assert t2.of("comment") == []                      # no comment attempts on a dead issue
+    assert len(t2.of("create")) == 1                   # exactly one create
+    rec = _mirrors(build)[k]
+    assert rec.status == "open" and rec.issue == 700   # old record superseded
+    assert rec.lifecycle == 2                          # new lifecycle
+    assert rec.token == ISS._search_token("API", k, 2)  # fresh token
+    assert any("deleted" in ln for ln in report)       # surfaced explicitly
+    # the run after that is an ordinary live-mirror run — no residue
+    t3 = FakeTransport()
+    t3.states[700] = "open"
+    rows3, report3, mutated3 = _apply(build, cfg, root, facts, t3)
+    assert not mutated3 and {c[0] for c in t3.calls} == {"get_state"}
+
+
+def test_dismissing_issue_deleted_and_resolved_is_record_only(tmp_path, monkeypatch):
+    src, build, k = _dismissing_intent(tmp_path, monkeypatch)
+    assert R.main([str(build), "--apply"]) == 0        # the fact resolves
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t2 = FakeTransport()
+    t2.states[101] = "missing"
+    rows, report, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t2)
+    assert t2.calls == []                              # record-only — no tracker touch at all
+    assert _mirrors(build)[k].status == "resolved"     # resolution supersedes, no crash
+
+
+def test_dismissing_issue_deleted_not_evaluated_is_deferred(tmp_path, monkeypatch):
+    src, build, k = _dismissing_intent(tmp_path, monkeypatch)
+    _disable_freshness(build)                          # next run: NOT evaluated
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t2 = FakeTransport()
+    t2.states[101] = "missing"
+    rows, report, mutated = _apply(build, cfg, root, ISS.staleness_facts(issues), t2)
+    assert t2.calls == [] and not mutated              # preserved untouched, no crash
+    assert ISS.load_mirrors(build)[k].status == "dismissing"
+    # evaluation resumes still-stale → the deletion is then handled (new lifecycle)
+    _reenable_freshness(build)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t3 = FakeTransport()
+    t3.states[101] = "missing"
+    t3.next_number = 800
+    _apply(build, cfg, root, ISS.staleness_facts(issues), t3)
+    rec = _mirrors(build)[k]
+    assert rec.status == "open" and rec.issue == 800 and rec.lifecycle == 2
+
+
+def test_resolving_issue_deleted_is_record_only(tmp_path):
+    """Sweep: the resolving-retry path reality-checks through get_state FIRST (the
+    resolve branch's existing IssueNotFound catch), so a deletion after the
+    resolving intent is already record-only — proven, not assumed."""
+    src, build, k = _mirrored_stale(tmp_path)
+    assert R.main([str(build), "--apply"]) == 0        # the fact resolves
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    t1 = FakeTransport()
+    t1.states[101] = "open"
+    t1.fail["comment"] = ISS.EmissionError("HTTP 502")
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t1)            # resolving intent persisted
+    assert ISS.load_mirrors(build)[k].status == "resolving"
+    t2 = FakeTransport()
+    t2.states[101] = "missing"                         # deleted after the intent
+    rows, report, _ = _apply(build, cfg, root, facts, t2)
+    assert t2.of("comment") == [] and t2.of("close") == []
+    assert len(t2.of("get_state")) == 1                # the access-verified reality check
+    assert _mirrors(build)[k].status == "resolved"     # record-only, never stuck
+    assert any("deleted" in ln for ln in report)
 
 
 # ═══ Review round 11 — P2: canonical EMPTY front matter is valid, never malformed ═══

@@ -72,10 +72,14 @@ One entry per mirrored fact. File: `version: v1`, records sorted by pin key (det
   (round 2 P2-1; R4) — and likewise a deleted issue of a still-stale up-to-date mirror
   starts a new lifecycle.
 - `open` → `dismissing` — the dismissal INTENT, persisted BEFORE the one continued-staleness
-  note (R10). `dismissing` → `dismissed` — the note confirmed (a retry marker-checks before
-  ever re-posting — OQ-C's "exactly one comment" survives any crash). `dismissing` →
-  `resolved` — the fact resolved while the confirm was pending: record-only, the moot note is
-  never posted late.
+  note (R10). `dismissing` → `dismissed` — the note confirmed (a retry reality-checks the
+  issue, then marker-checks before ever re-posting — OQ-C's "exactly one comment" survives any
+  crash). `dismissing` → `resolved` — the fact resolved while the confirm was pending:
+  record-only, the moot note is never posted late. `dismissing` → superseded by a NEW
+  lifecycle's `creating`/`open` — the issue was DELETED while the fact is still stale
+  (round 12: deletion is a stronger operator act than closure — the closure died with the
+  issue, and the present fact needs a live mirror); under a not-evaluated run the record is
+  preserved untouched until a determinate apply classifies.
 - `dismissed` → `resolved` — the fact later resolves: record-only (no comment on a closed issue).
 - `dismissed` stays `dismissed` on further upstream movement (R5): quiet.
 - `resolved` records are retained (audit); a NEW staleness of the same pin key after resolution

@@ -326,6 +326,20 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   forensics — same contract), malformed → typed `IssuesFileError`, exit 2, before any tracker
   access; and the recovery paths re-validate through `_require_token` before building any
   query (structural defense-in-depth — a future loader relaxation cannot reopen the hole).
+- **Round 12 P2 — a deleted issue under a pending dismissal never loops**: after a
+  `dismissing` intent persisted, a tracker-side deletion made every apply's comment-marker
+  check raise — the record looped in `dismissing` forever. The dismissal-completion path now
+  reality-checks through `get_state` FIRST (whose 404-disambiguation already lives in the
+  transport, round 6 — an IssueNotFound there is access-verified, no extra probe). Reading,
+  recorded deliberately: DELETING the issue is a stronger operator act than closing it — the
+  closure and its pending note died with the issue, and the fact's PRESENCE is determinate
+  evidence of continued staleness, so the still-stale direction starts a NEW lifecycle (fresh
+  ordinal + token; the dismissing record is superseded by the create intent). The fact-absent
+  directions were already structurally safe (record-only resolution supersession and the
+  not-evaluated preserve-skip touch no tracker) and are now pinned by tests, as is the sweep
+  of the `resolving` twin: its retry reality-checks through the resolve branch's existing
+  get_state catch, so deletion after a resolving intent lands record-only `resolved` — proven,
+  not assumed.
 
 ## R11 — Resolution-detail classification via the current citation set (review round 3, P2-3)
 

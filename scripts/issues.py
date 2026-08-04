@@ -923,6 +923,25 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
     def finish_dismissal(row: PlanRow, rec: MirrorRecord, f: StalenessFact,
                          note: str = "completed pending dismissal note — "
                                      "will not re-open") -> None:
+        # Round 12: reality-check FIRST — the issue can have been DELETED after the
+        # dismissing intent persisted, and has_comment_marker on a dead issue
+        # raises on every apply, looping the record in `dismissing` forever. The
+        # check goes through get_state, whose 404-disambiguation already lives in
+        # the transport (round 6) — an IssueNotFound here is access-verified, a
+        # true deletion verdict, no extra probe needed.
+        try:
+            transport.get_state(rec.repo, rec.issue)
+        except IssueNotFound:
+            # Deletion is a STRONGER operator act than closure: the closure (and
+            # the pending note) died with the issue, and the fact's PRESENCE is
+            # determinate evidence of continued staleness — a live mirror is
+            # needed (R9/R10 matrix). New lifecycle, fresh token; create_issue's
+            # intent write supersedes the dismissing record.
+            create_issue(row, f,
+                         f"pending dismissal's issue #{rec.issue} was deleted "
+                         f"repo-side — new lifecycle (the closure died with the "
+                         f"issue)", rec.lifecycle + 1)
+            return
         # R10 recovery: the note may or may not have posted — ONE bounded,
         # issue-scoped marker check decides; never a second note.
         if not transport.has_comment_marker(rec.repo, rec.issue, _require_token(rec)):
