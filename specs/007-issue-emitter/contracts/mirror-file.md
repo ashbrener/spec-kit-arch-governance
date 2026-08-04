@@ -24,6 +24,12 @@ mirrors:
     pinned_digest: sha256:<64hex>
     current_digest: sha256:<64hex>
     status: open        # open | creating | resolving | dismissing | resolved | dismissed
+    detail: <prose>     # REQUIRED on `resolving` (round 13 P2-2): the resolution reason as
+                        # PLANNED ("repinned to X" / "citation removed") — a comment retry
+                        # posts this stored value, never a recomputation the moved-on pin
+                        # file can no longer support (a missing value would silently change
+                        # remote content: the no-lenient-default precedent). Optional on
+                        # settled records (retained for forensics).
     token: <32-hex>     # REQUIRED on intent statuses (creating/resolving/dismissing): the
                         # recovery token AS POSTED, persisted at intent time so recovery
                         # never recomputes from live (mutable) config — a namespace change

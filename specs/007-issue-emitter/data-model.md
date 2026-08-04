@@ -43,6 +43,7 @@ One entry per mirrored fact. File: `version: v1`, records sorted by pin key (det
 | `status` | `str` | `open` \| `creating` \| `resolving` \| `dismissing` \| `resolved` \| `dismissed` |
 | `lifecycle` | `int` (>= 1, REQUIRED) | the key's issue-lifecycle ordinal (round 5 P1): 1 for the first issue, +1 per NEW issue (restale-after-resolved; deleted-and-recreated). Scopes the recovery marker; sourced from the sidecar, never the tracker |
 | `token` | `str` (REQUIRED on intent statuses; optional elsewhere) | the recovery token AS POSTED (round 7 P2-2) — recovery reads use the stored value verbatim, never a recompute from live config |
+| `detail` | `str` (REQUIRED on `resolving`; optional elsewhere) | the resolution reason as PLANNED (round 13 P2-2) — comment retries post the stored value, never a live recompute |
 
 **States & transitions** (writer: the apply loop only):
 

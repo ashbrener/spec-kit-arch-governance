@@ -232,7 +232,7 @@ def _rec(**kw):
     base = dict(citing="specs/001-derived/spec.md", relation="derived_from",
                 value="docs:005-fund-model", repo="acme/widgets", issue=42,
                 pinned_digest="sha256:" + "a" * 64, current_digest="sha256:" + "b" * 64,
-                status="open", lifecycle=1, token=None)
+                status="open", lifecycle=1, token=None, detail=None)
     base.update(kw)
     return ISS.MirrorRecord(**base)
 
@@ -896,6 +896,50 @@ def test_record_failure_after_create_recovers_by_marker_no_duplicate(tmp_path, m
     assert rec.status == "open" and rec.issue == 101
     assert rec.lifecycle == 1                              # same lifecycle adopts (round 5)
     assert len(report) == 1 and "adopted" in report[0] and "#101" in report[0]
+    assert t2.of("update_body") == []                      # no movement → no redundant update
+
+
+def test_adopted_create_refreshes_moved_content_same_run(tmp_path, monkeypatch):
+    """Round 13 P2-1: create succeeded, record failed, upstream moved AGAIN before
+    the retry — adoption must not leave the issue at the stale content state until
+    yet another apply (the R9 same-run precedent)."""
+    src, build, cfg, root, facts, k = _one_stale_enabled(tmp_path)
+    real = ISS.write_mirrors
+    n = {"count": 0}
+
+    def flaky(root_, records):                             # fail ONLY the post-create write
+        n["count"] += 1
+        if n["count"] == 2:
+            raise OSError("disk full")
+        return real(root_, records)
+
+    monkeypatch.setattr(ISS, "write_mirrors", flaky)
+    t = FakeTransport()
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t)                 # created remotely, unrecorded
+    monkeypatch.setattr(ISS, "write_mirrors", real)
+    # upstream moves AGAIN before the retry
+    (src / "specs" / "005-fund-model" / "spec.md").write_text(
+        UPSTREAM_SPEC.replace("v1", "v5"))
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts2 = ISS.staleness_facts(issues)
+    assert facts2[0].current_digest != facts[0].current_digest
+    t2 = FakeTransport()
+    t2.seeded_issue_bodies[101] = t.created[101]
+    rows, report, _ = _apply(build, cfg, root, facts2, t2)
+    assert t2.of("create") == []                           # adopted, never duplicated
+    updates = t2.of("update_body")
+    assert len(updates) == 1 and updates[0][2] == 101      # refreshed in the SAME apply
+    assert updates[0][3] == ISS.render_body(facts2[0], "API", 1)   # CURRENT-fact bytes
+    rec = _mirrors(build)[k]
+    assert rec.status == "open" and rec.issue == 101
+    assert rec.current_digest == facts2[0].current_digest  # digests current
+    # …and the next run is a quiet reality-check only
+    t3 = FakeTransport()
+    t3.states[101] = "open"
+    _, report3, mutated3 = _apply(build, cfg, root, facts2, t3)
+    assert not mutated3 and {c[0] for c in t3.calls} == {"get_state"}
 
 
 def test_intent_with_no_remote_effect_creates_exactly_once(tmp_path):
@@ -1583,8 +1627,71 @@ def test_loader_rejects_malformed_tokens_everywhere(tmp_path, status, issue, bad
 def test_loader_accepts_valid_tokens_on_every_status(tmp_path):
     for status, issue in (("creating", None), ("resolving", 42), ("dismissing", 42),
                           ("open", 42), ("resolved", 42), ("dismissed", 42)):
-        ISS.write_mirrors(tmp_path, [_rec(status=status, issue=issue, token="0af9" * 8)])
+        detail = "no longer stale" if status == "resolving" else None
+        ISS.write_mirrors(tmp_path, [_rec(status=status, issue=issue,
+                                          token="0af9" * 8, detail=detail)])
         assert ISS.load_mirrors(tmp_path)[_rec().key].token == "0af9" * 8   # round-trips
+
+
+# ═══ Review round 13 — P2-2: the resolution reason survives comment retries ═══
+# The honest reason ("repinned to X" / "citation removed") is computed when the
+# resolve is PLANNED; a retry may be unable to reconstruct it (the pin file has
+# moved on). The stored-vs-live doctrine (R8's token) applies to the DETAIL too.
+
+def test_resolution_reason_survives_comment_retry(tmp_path):
+    src, build, k = _mirrored_stale(tmp_path)          # open mirror #101, still stale
+    assert R.main([str(build), "--apply"]) == 0        # repin #1 — the honest reason
+    d1 = P.load_pins(build)[k].digest
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    t1 = FakeTransport()
+    t1.states[101] = "open"
+    t1.fail["comment"] = ISS.EmissionError("HTTP 502")
+    with pytest.raises(ISS.EmissionError):
+        _apply(build, cfg, root, facts, t1)            # resolving intent persisted
+    rec = ISS.load_mirrors(build)[k]
+    assert rec.status == "resolving"
+    assert rec.detail is not None and P.abbrev(d1) in rec.detail   # reason PERSISTED
+    # the pin file moves on before the retry — the original reason is now
+    # unreconstructible from live state
+    (src / "specs" / "005-fund-model" / "spec.md").write_text(
+        UPSTREAM_SPEC.replace("v1", "v9"))
+    assert R.main([str(build), "--apply"]) == 0        # repin #2 → a DIFFERENT digest
+    d2 = P.load_pins(build)[k].digest
+    assert d2 != d1
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    t2 = FakeTransport()
+    t2.states[101] = "open"                            # marker miss → the retry posts
+    rows, report, _ = _apply(build, cfg, root, ISS.staleness_facts(issues), t2)
+    posted = t2.posted[101][0]
+    assert P.abbrev(d1) in posted                      # the ORIGINAL honest reason
+    assert P.abbrev(d2) not in posted                  # never a recomputed claim
+    assert len(t2.of("close")) == 1
+    assert _mirrors(build)[k].status == "resolved"
+
+
+def test_loader_requires_detail_on_resolving(tmp_path):
+    ISS.write_mirrors(tmp_path, [_rec(status="resolving", token="a" * 32,
+                                      detail="no longer stale — repinned to abc123def456")])
+    loaded = ISS.load_mirrors(tmp_path)[_rec().key]
+    assert loaded.detail == "no longer stale — repinned to abc123def456"   # round-trips
+    for damage in (lambda m: m.pop("detail"),          # missing → refuse (remote content)
+                   lambda m: m.__setitem__("detail", ""),
+                   lambda m: m.__setitem__("detail", 7)):
+        doc = yaml.safe_load((tmp_path / ISS.MIRROR_FILE).read_text())
+        damage(doc["mirrors"][0])
+        (tmp_path / ISS.MIRROR_FILE).write_text(yaml.safe_dump(doc))
+        with pytest.raises(ISS.IssuesFileError):
+            ISS.load_mirrors(tmp_path)
+        ISS.write_mirrors(tmp_path, [_rec(status="resolving", token="a" * 32,
+                                          detail="no longer stale — repinned to abc123def456")])
+    # settled records may retain it (forensics) or omit it freely
+    ISS.write_mirrors(tmp_path, [_rec(status="resolved", detail="no longer stale")])
+    assert ISS.load_mirrors(tmp_path)[_rec().key].detail == "no longer stale"
+    ISS.write_mirrors(tmp_path, [_rec(status="resolved")])
+    assert ISS.load_mirrors(tmp_path)[_rec().key].detail is None
 
 
 def test_probe_layer_guards_token_shape_even_when_handed_directly(tmp_path):
@@ -2382,10 +2489,12 @@ def test_restale_fact_with_pending_close_completes_the_old_lifecycle_first(tmp_p
 
 
 def test_mirror_file_roundtrips_resolving_status(tmp_path):
-    r = _rec(status="resolving", token="e" * 32)       # intents carry their token (P2-2)
+    r = _rec(status="resolving", token="e" * 32,       # intents carry their token (P2-2)
+             detail="no longer stale")                 # …and their reason (round 13)
     ISS.write_mirrors(tmp_path, [r])
     loaded = ISS.load_mirrors(tmp_path)[r.key]
     assert loaded.status == "resolving" and loaded.token == "e" * 32
+    assert loaded.detail == "no longer stale"
 
 
 def test_sidecar_write_failure_is_a_typed_emission_error(tmp_path, capsys, monkeypatch):

@@ -163,6 +163,14 @@ class MirrorRecord:
     # intent statuses (no lenient default); retained on settled records for
     # forensics when present, but nothing reads it there.
     token: Optional[str] = None
+    # The resolution REASON as planned (round 13 P2-2): persisted with the
+    # `resolving` intent so a comment retry posts the ORIGINAL honest reason
+    # ("repinned to X" / "citation removed") — which may be unreconstructible
+    # later (the pin file has moved on). The stored-vs-live doctrine (R8's
+    # token) applied to prose. REQUIRED on `resolving` (a missing value would
+    # change remote content — the no-lenient-default precedent); retained on
+    # settled records for forensics when present.
+    detail: Optional[str] = None
 
     @property
     def key(self) -> P.PinKey:
@@ -216,6 +224,16 @@ def _validate_record(r: MirrorRecord) -> None:
         # a malformed retained value is corruption, never silently carried.
         raise IssuesFileError(f"mirror for {r.value!r} has a malformed retained "
                               f"'token' {r.token!r} (want exactly 32 lowercase hex chars)")
+    if r.status == "resolving":
+        # round 13 P2-2: the resolution reason is REQUIRED on the intent — a retry
+        # posts it into remote content, and a lenient default would silently change
+        # what the audit comment says (the no-lenient-default precedent).
+        if not isinstance(r.detail, str) or not r.detail:
+            raise IssuesFileError(f"mirror for {r.value!r} (resolving) has no stored "
+                                  f"'detail' — the retry cannot post the original "
+                                  f"resolution reason")
+    elif r.detail is not None and not isinstance(r.detail, str):
+        raise IssuesFileError(f"mirror for {r.value!r} has a non-string 'detail'")
     if not isinstance(r.lifecycle, int) or isinstance(r.lifecycle, bool) or r.lifecycle < 1:
         # REQUIRED (round 5 P1): the branch is unreleased, so no lenient default —
         # a missing/invalid lifecycle is corruption, and defaulting it could scope a
@@ -264,7 +282,7 @@ def load_mirrors(repo_root) -> dict[P.PinKey, MirrorRecord]:
                              issue=number, pinned_digest=_scalar(e, "pinned_digest"),
                              current_digest=_scalar(e, "current_digest"),
                              status=_scalar(e, "status"), lifecycle=e.get("lifecycle"),
-                             token=e.get("token"))
+                             token=e.get("token"), detail=e.get("detail"))
             _validate_record(r)
             if r.key in out:
                 raise IssuesFileError(f"duplicate mirror identity {r.key} — the file is "
@@ -287,7 +305,8 @@ def mirrors_to_yaml(records) -> str:
              "repo": r.repo, "issue": r.issue, "lifecycle": r.lifecycle,
              "pinned_digest": r.pinned_digest,
              "current_digest": r.current_digest, "status": r.status,
-             **({"token": r.token} if r.token is not None else {})}
+             **({"token": r.token} if r.token is not None else {}),
+             **({"detail": r.detail} if r.detail is not None else {})}
             for r in sorted(records, key=lambda r: r.key)
         ],
     }
@@ -952,6 +971,16 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
         record(replace(rec, status="dismissed"))
         report.append(_audit("dismissed", row, rec.issue, note))
 
+    def refresh_body(row: PlanRow, rec: MirrorRecord, f: StalenessFact,
+                     note: str) -> None:
+        """The update machinery (one copy): overwrite the emitter-owned body from
+        the CURRENT fact and record the refreshed digests."""
+        transport.update_body(rec.repo, rec.issue,
+                              render_body(f, ns, rec.lifecycle))
+        record(replace(rec, pinned_digest=f.pinned_digest,
+                       current_digest=f.current_digest))
+        report.append(_audit("updated", row, rec.issue, note))
+
     def close_with_audit(row: PlanRow, rec: MirrorRecord) -> None:
         """The R9 two-step on an OPEN issue: persist the `resolving` intent (the
         record's stored token preferred — round 8), post the audit comment from
@@ -959,10 +988,11 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
         resolve path and same-run recovery completion (round 9 P2-1) — one
         machinery, never a parallel copy."""
         resolving = replace(rec, status="resolving",
-                            token=rec.token or _search_token(ns, row.key, rec.lifecycle))
+                            token=rec.token or _search_token(ns, row.key, rec.lifecycle),
+                            detail=row.detail or "no longer stale")   # round 13 P2-2
         record(resolving)
         transport.comment(resolving.repo, resolving.issue,
-                          render_resolution_comment(resolving, row.detail, ns))
+                          render_resolution_comment(resolving, resolving.detail, ns))
         transport.close(resolving.repo, resolving.issue)
         record(replace(resolving, status="resolved"))
         report.append(_audit("resolved", row, resolving.issue,
@@ -1016,10 +1046,19 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                     except IssueNotFound:
                         state = None            # vanished between search and read
                     if state == "open":
-                        record(replace(rec, issue=found, status="open"))
+                        adopted = replace(rec, issue=found, status="open")
+                        record(adopted)
                         report.append(_audit("adopted", row, found,
                                              "interrupted create recovered — issue "
                                              "found by marker"))
+                        if (adopted.pinned_digest, adopted.current_digest) != (
+                                f.pinned_digest, f.current_digest):
+                            # round 13 P2-1: the upstream moved again since the
+                            # interrupted create — same-run consistency (the R9
+                            # precedent), via the one update machinery
+                            refresh_body(row, adopted, f,
+                                         "content moved since the interrupted "
+                                         "create — body refreshed")
                         mutated = True
                         continue
                     if state == "closed":
@@ -1055,11 +1094,7 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
             if state == "closed":
                 dismiss(row, rec, f)
             else:
-                transport.update_body(rec.repo, rec.issue,
-                                      render_body(f, ns, rec.lifecycle))
-                record(replace(rec, pinned_digest=f.pinned_digest,
-                               current_digest=f.current_digest))
-                report.append(_audit("updated", row, rec.issue, row.detail))
+                refresh_body(row, rec, f, row.detail)
             mutated = True
         elif row.disposition == "resolve":
             rec = row.record
@@ -1148,11 +1183,14 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                 # audit comments, no close without its audit trail.
                 if rec.status == "resolving":
                     # retry entry: marker-check with the STORED token before ever
-                    # re-posting (rounds 7/8), then complete the close
+                    # re-posting (rounds 7/8); a re-post carries the STORED reason
+                    # (round 13 P2-2) — the plan-time honest detail, never a
+                    # recomputation the moved-on pin file can no longer support
                     if not transport.has_comment_marker(rec.repo, rec.issue,
                                                         _require_token(rec)):
                         transport.comment(rec.repo, rec.issue,
-                                          render_resolution_comment(rec, row.detail, ns))
+                                          render_resolution_comment(
+                                              rec, rec.detail or "", ns))
                     transport.close(rec.repo, rec.issue)
                     record(replace(rec, status="resolved"))
                     report.append(_audit("resolved", row, rec.issue,

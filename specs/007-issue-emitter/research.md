@@ -340,6 +340,19 @@ All unknowns from Technical Context resolved. Format: Decision / Rationale / Alt
   of the `resolving` twin: its retry reality-checks through the resolve branch's existing
   get_state catch, so deletion after a resolving intent lands record-only `resolved` — proven,
   not assumed.
+- **Round 13 — recovery freshness refinements**: (P2-1) an adopted interrupted create whose
+  upstream moved AGAIN before the retry was left at the stale content state until yet another
+  apply; adoption now compares the recovered record's content state to the current fact and,
+  when they differ, runs the ONE update machinery (`refresh_body`, shared with the normal
+  update path) in the same apply — the R9 same-run precedent. (P2-2) the resolution reason is
+  computed when the resolve is PLANNED and may be unreconstructible at retry time (the pin
+  file has moved on) — the `resolving` intent now persists the DETAIL beside the token
+  (stored-vs-live, R8's doctrine applied to prose), and every retry that posts the audit
+  comment reads the stored value; REQUIRED on `resolving` (a missing value would change
+  remote content). Dismissal-note sweep, answered: the note's variable parts are the CURRENT
+  fact's digests — always available on that path (the fact is present by construction) and
+  MORE honest fresh than frozen — and the rest is fixed wording, so no stored detail is
+  needed there; the marker-check already prevents byte-drift from double-posting.
 
 ## R11 — Resolution-detail classification via the current citation set (review round 3, P2-3)
 
