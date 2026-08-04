@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.2.2] — 2026-08-04
+
+### Fixed
+- **A resumed (reopened) mirror catches up in the same apply.** `issues_plan` classifies a `dismissing` row from its **status**, never its digests — so when 1.2.1's resume path restored the record to `open`, content that had moved while the dismissal was pending stayed stale (old body, old digests) until some later invocation, behind an apply that reported success. The resume now compares the record's content state against the current fact and routes through the one update machinery when they differ.
+
 ## [1.2.1] — 2026-08-04
 
 Two fixes for defects that only manifest in a **delivered** extension body — both surfaced by a

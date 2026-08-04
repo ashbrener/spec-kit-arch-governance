@@ -2932,3 +2932,34 @@ def test_validate_reports_staleness_when_the_emitter_module_is_absent(tmp_path, 
                           capture_output=True, text=True, timeout=60)
     assert "Traceback" not in (done.stdout + done.stderr), done.stdout + done.stderr
     assert "STALE" in done.stdout, done.stdout
+
+
+def test_reopened_mirror_refreshes_moved_content_same_run(tmp_path, monkeypatch):
+    """The plan classifies a `dismissing` row from its STATUS, never its digests —
+    so a resume must catch up itself. Content that moved while the dismissal was
+    pending is refreshed in the SAME apply (the R9 same-run precedent); a
+    `--apply` reporting success must not leave the resumed mirror stale."""
+    src, build, k = _dismissing_intent(tmp_path, monkeypatch)
+    # upstream moves WHILE the dismissal is pending, then the operator reopens
+    (src / "specs" / "005-fund-model" / "spec.md").write_text(
+        UPSTREAM_SPEC.replace("v1", "v9"))
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    t2 = FakeTransport()
+    t2.states[101] = "open"                            # reopened by the operator
+    rows, report, _ = _apply(build, cfg, root, facts, t2)
+
+    assert t2.of("comment") == []                      # still no false closed-issue note
+    assert len(t2.of("update_body")) == 1              # caught up in THIS run
+    rec = _mirrors(build)[k]
+    assert rec.status == "open" and rec.issue == 101
+    assert rec.current_digest == facts[0].current_digest   # digests now current
+    assert any("reopened" in ln for ln in report)
+    assert any("moved while the dismissal was pending" in ln for ln in report)
+
+    # and the run after that is quiet — no repeated refresh
+    t3 = FakeTransport()
+    t3.states[101] = "open"
+    _, _, mutated3 = _apply(build, cfg, root, facts, t3)
+    assert not mutated3 and {c[0] for c in t3.calls} == {"get_state"}

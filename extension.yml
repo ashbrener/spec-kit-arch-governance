@@ -31,7 +31,10 @@ extension:
   # emitter (a missing/damaged issues.py in a delivered copy crashed validate/gate on the
   # very staleness finding they report), and a REOPENED issue during dismissal recovery
   # resumes the mirror instead of being recorded permanently `dismissed`.
-  version: "1.2.1"
+  # 1.2.2 — a resumed (reopened) mirror whose cited content moved while the dismissal was
+  # pending is refreshed in the SAME apply: the plan classifies that row from its status,
+  # never its digests, so the resume must catch up itself.
+  version: "1.2.2"
   description: "Keep specs, code & ADRs in sync — born-compliant citation slots + a read-only fail-closed validator on every spec and plan."
   author: "Ash Brener"
   repository: "https://github.com/ashbrener/spec-kit-arch-governance"
