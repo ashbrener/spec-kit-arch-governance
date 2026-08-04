@@ -9,6 +9,8 @@ enforces. All network lives behind `IssueTransport`; every test injects the reco
 """
 
 import os
+import shutil
+import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -2883,3 +2885,50 @@ def test_gh_transport_maps_failure_and_not_found(monkeypatch):
         g.close("o/r", 9)
     assert not isinstance(exc.value, ISS.IssueNotFound)
     assert "api.github.com" in str(exc.value)
+
+
+def test_dismissing_issue_reopened_by_operator_resumes_the_mirror(tmp_path, monkeypatch):
+    """A reopen is the operator RE-ADOPTING the mirror (never fight the operator, in
+    either direction). The pending dismissal is abandoned: no false "closed by
+    operator" note, no permanently-`dismissed` record orphaning a LIVE issue."""
+    src, build, k = _dismissing_intent(tmp_path, monkeypatch)
+    cfg, root = V.load_config(build)
+    issues, _ = V.validate(cfg, root)
+    facts = ISS.staleness_facts(issues)
+    t2 = FakeTransport()
+    t2.states[101] = "open"                            # the operator REOPENED it
+    rows, report, _ = _apply(build, cfg, root, facts, t2)
+
+    assert t2.of("comment") == []                      # no false closed-issue note
+    assert t2.of("create") == []                       # the live issue is kept, not replaced
+    rec = _mirrors(build)[k]
+    assert rec.status == "open"                        # resumed, NOT dismissed
+    assert rec.issue == 101 and rec.lifecycle == 1     # same issue, same lifecycle
+    assert any("reopened" in ln for ln in report)      # surfaced explicitly
+
+    # From here it is an ordinary live mirror: the next run is a quiet reality check.
+    t3 = FakeTransport()
+    t3.states[101] = "open"
+    _, _, mutated3 = _apply(build, cfg, root, facts, t3)
+    assert not mutated3 and {c[0] for c in t3.calls} == {"get_state"}
+
+
+def test_staleness_fact_lives_in_the_engine_and_is_re_exported(tmp_path):
+    """Enforcement must not depend on the optional emitter: the fact type is defined
+    in validate.py; issues.py re-exports the SAME object."""
+    assert ISS.StalenessFact is V.StalenessFact
+    assert V.StalenessFact.__module__ == "validate"
+
+
+def test_validate_reports_staleness_when_the_emitter_module_is_absent(tmp_path, monkeypatch):
+    """A DELIVERED body can lack scripts/issues.py (partial copy, operator deletion).
+    validate must still report the staleness finding — never crash on an import."""
+    _, build, _, _, _ = _stale_pair(tmp_path)
+    body = tmp_path / "delivered"
+    shutil.copytree(SCRIPTS, body)
+    (body / "issues.py").unlink()                      # the optional emitter is gone
+
+    done = subprocess.run([sys.executable, str(body / "validate.py"), str(build)],
+                          capture_output=True, text=True, timeout=60)
+    assert "Traceback" not in (done.stdout + done.stderr), done.stdout + done.stderr
+    assert "STALE" in done.stdout, done.stdout
