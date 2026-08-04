@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-08-04
+
+Two fixes for defects that only manifest in a **delivered** extension body — both surfaced by a
+downstream review of a vendored copy, and structurally invisible from inside this repo (where
+`scripts/` is always complete and the emitter is exercised through its own tests).
+
+### Fixed
+- **Enforcement no longer imports the optional emitter.** `check_citations_fresh`'s stale-pin branch did a deferred `from issues import StalenessFact`. In a delivered body that module can be missing (partial copy, operator deletion) or damaged — and a damaged module raises `SyntaxError` at import time, which is not an `ImportError`. Either way `validate`/`gate` crashed on the very staleness finding they exist to report. `StalenessFact` now lives in `validate.py`, where engine output belongs; `issues.py` re-exports the same object, so every existing reference keeps working. With no import cycle left to dodge, `Issue.fact` is precisely typed instead of `object`.
+- **A reopened issue is honored during dismissal recovery.** `finish_dismissal` called `get_state` purely as an existence probe and discarded the returned state: an issue the operator reopened while a `dismissing` intent was pending got a note claiming it was closed and was recorded `dismissed` permanently — orphaning a live issue the emitter then stopped maintaining. A reopen is the operator re-adopting the mirror (never fight the operator, in either direction): the pending dismissal is abandoned, the record returns to `open`, and the normal open-mirror machinery resumes. No comment is posted — the reopen already says it.
+
+### Changed
+- Extension manifest version `1.2.0` → `1.2.1` (patch: behavior fixes in the delivered body, no surface change). Consumers pinning the tree should re-vendor to pick these up.
+
 ## [1.2.0] — 2026-08-03
 
 **issues** (slice `specs/007-issue-emitter/`) — the visibility slice spec 006 deferred: an

@@ -27,7 +27,11 @@ extension:
   # validated staleness facts (determinate citations_fresh failures from the one engine)
   # into GitHub issues. Explicit verb only — never a hook; dry-run default, fully offline;
   # --apply is the single networked mode (the operator's ambient `gh` credential).
-  version: "1.2.0"
+  # 1.2.1 — two delivered-body fixes: the enforcement path no longer imports the OPTIONAL
+  # emitter (a missing/damaged issues.py in a delivered copy crashed validate/gate on the
+  # very staleness finding they report), and a REOPENED issue during dismissal recovery
+  # resumes the mirror instead of being recorded permanently `dismissed`.
+  version: "1.2.1"
   description: "Keep specs, code & ADRs in sync — born-compliant citation slots + a read-only fail-closed validator on every spec and plan."
   author: "Ash Brener"
   repository: "https://github.com/ashbrener/spec-kit-arch-governance"
