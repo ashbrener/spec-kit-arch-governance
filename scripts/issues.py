@@ -957,10 +957,21 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
             # dismissal, restore the record to `open`, and let the normal
             # open-mirror machinery manage it from here. No comment — the reopen
             # already says it.
-            record(replace(rec, status="open"))
+            resumed = replace(rec, status="open")
+            record(resumed)
             report.append(_audit("open", row, rec.issue,
                                  "operator reopened the issue — pending dismissal "
                                  "abandoned, mirror resumed"))
+            # The plan classified this row from the `dismissing` STATUS, so it
+            # never compared digests. If the cited content moved while the
+            # dismissal was pending, the resumed mirror's body and digests are
+            # stale — and a `--apply` that reports success must not leave it that
+            # way until some later invocation. Same-run catch-up through the ONE
+            # update machinery (the R9 same-run precedent).
+            if (resumed.pinned_digest, resumed.current_digest) != (
+                    f.pinned_digest, f.current_digest):
+                refresh_body(row, resumed, f,
+                             "content moved while the dismissal was pending")
             return
         # R10 recovery: the note may or may not have posted — ONE bounded,
         # issue-scoped marker check decides; never a second note.
