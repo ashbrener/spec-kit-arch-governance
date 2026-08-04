@@ -61,6 +61,34 @@ class Citation:
             self.raw = self.value
 
 
+@dataclass(frozen=True)
+class StalenessFact:
+    """The machine face of one determinate `citations_fresh` failure — the emitter's
+    sole input. Attached by the engine's stale-pin branch (the one place the
+    determinate-mismatch prose is built); the emitter NEVER constructs facts itself.
+
+    Defined HERE, in the engine, not in the optional emitter: enforcement
+    (validate/gate) must never depend on `issues.py` being importable. In a
+    DELIVERED extension body that module can be missing (partial copy, operator
+    deletion) or damaged (a SyntaxError at import time is not an ImportError), and
+    a deferred `from issues import StalenessFact` would crash the very staleness
+    finding enforcement exists to report. `issues.py` re-exports this name.
+    """
+
+    relation: str          # derived_from | cites
+    value: str             # citation value exactly as written (pin identity component)
+    citing: str            # citing artifact relpath
+    cited_display: str     # cited artifact's display path (Target.display)
+    pinned_digest: str     # sha256:<64hex> recorded at pin time
+    pinned_date: str       # ISO date from the pin
+    current_digest: str    # sha256:<64hex> of the cited artifact now
+
+    @property
+    def key(self) -> P.PinKey:
+        """Identity (OQ-A): the pin key — same key as `.spec-arch-pins.yml`."""
+        return P.pin_key(self.citing, self.relation, self.value)
+
+
 @dataclass
 class Issue:
     check: str
@@ -68,11 +96,10 @@ class Issue:
     where: str = ""
     severity: str = "fail"   # fail | note
     # Slice 007 (D1): the machine face of a determinate citations_fresh staleness
-    # finding — an issues.StalenessFact, attached ONLY by the stale-pin branch of
-    # check_citations_fresh. Default None keeps every existing constructor and
-    # consumer (report, gate, flip guard) byte-identical; only the issues emitter
-    # reads it. Typed loosely to avoid a module import cycle (issues imports us).
-    fact: object = None
+    # finding, attached ONLY by the stale-pin branch of check_citations_fresh.
+    # Default None keeps every existing constructor and consumer (report, gate,
+    # flip guard) byte-identical; only the issues emitter reads it.
+    fact: StalenessFact | None = None
     # Slice 007 review R8: True on the citations_fresh notes that mean "freshness
     # could NOT be determinately evaluated" (malformed pin file, indeterminate
     # skips) — a STRUCTURAL signal, never matched by prose. The emitter uses it to
@@ -477,9 +504,7 @@ def check_citations_fresh(cfg: GovernanceConfig, repo_root: Path, cits, adr_inde
         elif t.digest != pin.digest:
             # Slice 007 (D1/R2): the ONE fact-attachment site. The structured fact rides
             # the same Issue the enforcement path already consumes — one engine, two
-            # consumers — so the fact set and the finding set can never diverge. The
-            # import is deferred (issues.py imports this module at its top level).
-            from issues import StalenessFact
+            # consumers — so the fact set and the finding set can never diverge.
             out.append(Issue("citations_fresh",
                              f"{c.relation} {c.raw!r} is STALE — {t.display} changed since it was "
                              f"pinned (pinned {P.abbrev(pin.digest)}, current {P.abbrev(t.digest)}); "

@@ -68,24 +68,11 @@ _TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 
 # ──────────────────────────── staleness facts (D1/R2) ────────────────────────────
 
-@dataclass(frozen=True)
-class StalenessFact:
-    """The machine face of one determinate `citations_fresh` failure — the emitter's
-    sole input. Attached by the engine's stale-pin branch (the one place the
-    determinate-mismatch prose is built); the emitter NEVER constructs facts itself."""
-
-    relation: str          # derived_from | cites
-    value: str             # citation value exactly as written (pin identity component)
-    citing: str            # citing artifact relpath
-    cited_display: str     # cited artifact's display path (Target.display)
-    pinned_digest: str     # sha256:<64hex> recorded at pin time
-    pinned_date: str       # ISO date from the pin
-    current_digest: str    # sha256:<64hex> of the cited artifact now
-
-    @property
-    def key(self) -> P.PinKey:
-        """Identity (OQ-A): the pin key — same key as `.spec-arch-pins.yml`."""
-        return P.pin_key(self.citing, self.relation, self.value)
+# The fact type lives in the ENGINE (`validate.py`), not here: enforcement must
+# never depend on this optional, default-disabled module being importable — a
+# delivered body can be missing or damaged. Re-exported so `issues.StalenessFact`
+# stays a valid reference for every existing caller and test.
+StalenessFact = V.StalenessFact
 
 
 def staleness_facts(issues) -> list[StalenessFact]:
@@ -949,7 +936,7 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
         # the transport (round 6) — an IssueNotFound here is access-verified, a
         # true deletion verdict, no extra probe needed.
         try:
-            transport.get_state(rec.repo, rec.issue)
+            state = transport.get_state(rec.repo, rec.issue)
         except IssueNotFound:
             # Deletion is a STRONGER operator act than closure: the closure (and
             # the pending note) died with the issue, and the fact's PRESENCE is
@@ -960,6 +947,20 @@ def apply_plan(rows, mirrors, cfg, repo_root, transport: IssueTransport,
                          f"pending dismissal's issue #{rec.issue} was deleted "
                          f"repo-side — new lifecycle (the closure died with the "
                          f"issue)", rec.lifecycle + 1)
+            return
+        if state == "open":
+            # The operator REOPENED the issue while the dismissal was pending. A
+            # dismissal note claiming "closed by operator" would be false, and
+            # recording `dismissed` would orphan a LIVE issue the emitter then
+            # stops maintaining. A reopen is the operator re-adopting the mirror
+            # (never fight the operator, in EITHER direction): abandon the
+            # dismissal, restore the record to `open`, and let the normal
+            # open-mirror machinery manage it from here. No comment — the reopen
+            # already says it.
+            record(replace(rec, status="open"))
+            report.append(_audit("open", row, rec.issue,
+                                 "operator reopened the issue — pending dismissal "
+                                 "abandoned, mirror resumed"))
             return
         # R10 recovery: the note may or may not have posted — ONE bounded,
         # issue-scoped marker check decides; never a second note.
