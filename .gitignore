@@ -13,3 +13,7 @@ uv.lock
 .claude/worktrees/
 .specify/cache/
 .specify/feature.json
+
+# Session scratch — never tracked, never shipped.
+HANDOFF.md
+CATALOG-SUBMISSION.md
