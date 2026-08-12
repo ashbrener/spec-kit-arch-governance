@@ -34,7 +34,7 @@ extension:
   # 1.2.2 — a resumed (reopened) mirror whose cited content moved while the dismissal was
   # pending is refreshed in the SAME apply: the plan classifies that row from its status,
   # never its digests, so the resume must catch up itself.
-  version: "1.2.2"
+  version: "1.2.3"
   description: "Keep specs, code & ADRs in sync — born-compliant citation slots + a read-only fail-closed validator on every spec and plan."
   author: "Ash Brener"
   repository: "https://github.com/ashbrener/spec-kit-arch-governance"
