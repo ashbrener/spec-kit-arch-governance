@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [1.2.3] — 2026-08-13
+
+Documentation-accuracy release. No behaviour change, no contract change
+(`vocabulary.json` stays `0.3.0`).
+
+### Fixed
+- **The README header advertised a stale surface.** It read `Version: 1.1.0 · Provides: 5 commands, 3 hooks` while the manifest was `1.2.2` with **6** commands — so the published documentation understated the extension by a version and a command (`issues`), even though the body already documented all six. Caught in review of the community-catalog submission. The header now tracks the manifest.
+- Cut as a new patch release rather than re-pointing the `v1.2.2` tag: a published tag is an immutable artifact, and silently moving one is precisely the drift this extension exists to detect.
+
 ## [1.2.2] — 2026-08-04
 
 ### Fixed

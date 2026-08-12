@@ -78,3 +78,22 @@ def test_lifecycle_validates_specs_and_plans():
                         if c["name"].endswith(".validate"))
     assert hooks["after_specify"]["command"] == validate_cmd
     assert hooks["after_plan"]["command"] == validate_cmd
+
+
+def test_readme_header_matches_the_manifest():
+    """The published README header must not understate the shipped surface.
+
+    A catalog reviewer reads README.md at the documentation URL, so a stale
+    'Version: X · Provides: N commands' line misrepresents the release even when
+    the body is correct. This pins that header to `extension.yml` — the same
+    conform-or-fail discipline the vocabulary and domain-schema tests apply.
+    """
+    m = _manifest()
+    header = next(ln for ln in (ROOT / "README.md").read_text(encoding="utf-8").splitlines()
+                  if ln.startswith("**Version:**"))
+    assert f"**Version:** {m['extension']['version']}" in header, (
+        f"README header version drifted from the manifest ({m['extension']['version']}): {header!r}")
+    n_commands = len(m["provides"]["commands"])
+    n_hooks = len(m["hooks"])
+    assert f"{n_commands} commands, {n_hooks} hooks" in header, (
+        f"README header must advertise {n_commands} commands, {n_hooks} hooks: {header!r}")

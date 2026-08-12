@@ -4,7 +4,7 @@
 
 A standalone, interview-driven [SpecKit](https://github.com/github/spec-kit) extension that stops a project's **specifications, code, and architecture decisions** from drifting apart — regardless of how many repos the project has or what they're named. It discovers your topology by asking at install, makes typed citations between specs/plans/ADRs *exist* (templates), stay *true* (validator), and get *enforced* (lifecycle hooks). For multi-repo projects it ships a shared **domain manifest** so every repo self-configures with no fleet manager.
 
-**Version:** 1.1.0 · **Requires:** spec-kit ≥ 0.1.0 · **License:** MIT · **Provides:** 5 commands, 3 hooks
+**Version:** 1.2.3 · **Requires:** spec-kit ≥ 0.1.0 · **License:** MIT · **Provides:** 6 commands, 3 hooks
 **Repository:** <https://github.com/ashbrener/spec-kit-arch-governance>
 
 > Citation/architecture **integrity** — *not* access control, and not generic “architecture linting.” It governs whether spec↔code↔ADR citations resolve, stay current, and remain immutable.
